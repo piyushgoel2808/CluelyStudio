@@ -12,18 +12,22 @@ export class TranscriptionService {
   private activeTranscriptions: Set<Promise<unknown>> = new Set();
 
   /**
-   * Wait for any in-flight ASR transcription tasks to finish (up to maxWaitMs).
+   * Wait for any in-flight ASR transcription tasks to finish (up to timeoutMs).
    * Called by aiRouter before reading transcripts so freshly spoken words are
    * guaranteed to be committed to the store before slicing!
    */
-  public async waitForPendingTranscriptions(maxWaitMs: number = 1500): Promise<void> {
+  public async awaitPendingTranscriptions(timeoutMs: number = 3000): Promise<void> {
     if (this.activeTranscriptions.size === 0) return;
     const currentPromises = Array.from(this.activeTranscriptions);
-    const timeoutPromise = new Promise((resolve) => setTimeout(resolve, maxWaitMs));
+    const timeoutPromise = new Promise((resolve) => setTimeout(resolve, timeoutMs));
     await Promise.race([
       Promise.allSettled(currentPromises),
       timeoutPromise,
     ]);
+  }
+
+  public async waitForPendingTranscriptions(maxWaitMs: number = 3000): Promise<void> {
+    return this.awaitPendingTranscriptions(maxWaitMs);
   }
 
   public async transcribeSegment(
@@ -697,3 +701,5 @@ export class TranscriptionService {
 }
 
 export const transcriptionService = new TranscriptionService();
+export const awaitPendingTranscriptions = (timeoutMs?: number) =>
+  transcriptionService.awaitPendingTranscriptions(timeoutMs);

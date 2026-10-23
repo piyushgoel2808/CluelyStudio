@@ -280,9 +280,9 @@ export interface VADSegmentResult {
 
 export class RealTimeVAD {
   private bufferChunks: Int16Array[] = [];
-  // Rolling pre-roll ring buffer to capture ~350ms of audio before speech onset
+  // Rolling 600ms pre-roll ring buffer (9600 samples at 16kHz) to capture speech onset
   private preRollChunks: Int16Array[] = [];
-  private readonly maxPreRollChunks: number = 8; // ~340ms at ~42.6ms per chunk
+  private readonly maxPreRollSamples: number = 9600; // 600ms at 16kHz
 
   private speechStartTimestamp: number | null = null;
   private lastVoicedTimestamp: number | null = null;
@@ -291,11 +291,11 @@ export class RealTimeVAD {
   private consecutiveVoicedFrames: number = 0;
   private isSpeaking: boolean = false;
 
-  private readonly minSpeechDurationMs = 250;
-  private readonly maxSegmentMs = 7000;
+  private readonly minSpeechDurationMs = 200;
+  private readonly maxSegmentMs = 35000; // 35 seconds to hold long multi-sentence questions
 
-  private silenceHangoverMs: number = 500;
-  private partialEmissionIntervalMs: number = 500;
+  private silenceHangoverMs: number = 1300; // Balanced: 1300ms to bridge breathing pauses
+  private partialEmissionIntervalMs: number = 600;
 
   constructor(profile: NvidiaLatencyProfile = 'balanced') {
     this.setLatencyProfile(profile);
@@ -303,15 +303,15 @@ export class RealTimeVAD {
 
   public setLatencyProfile(profile: NvidiaLatencyProfile): void {
     if (profile === 'ultra-low') {
-      this.silenceHangoverMs = 350;
-      this.partialEmissionIntervalMs = 350;
+      this.silenceHangoverMs = 850;
+      this.partialEmissionIntervalMs = 400;
     } else if (profile === 'high-accuracy') {
-      this.silenceHangoverMs = 750;
-      this.partialEmissionIntervalMs = 700;
+      this.silenceHangoverMs = 1800;
+      this.partialEmissionIntervalMs = 800;
     } else {
-      // balanced (Meetily 500ms live policy)
-      this.silenceHangoverMs = 500;
-      this.partialEmissionIntervalMs = 500;
+      // balanced default: 1300ms silence hangover
+      this.silenceHangoverMs = 1300;
+      this.partialEmissionIntervalMs = 600;
     }
   }
 
@@ -356,10 +356,12 @@ export class RealTimeVAD {
     }
 
     if (!this.isSpeaking) {
-      // Maintain rolling pre-roll buffer during silence
+      // Maintain rolling 600ms pre-roll buffer during silence
       this.preRollChunks.push(new Int16Array(pcmChunk));
-      if (this.preRollChunks.length > this.maxPreRollChunks) {
-        this.preRollChunks.shift();
+      let currentPreRollSamples = this.preRollChunks.reduce((acc, c) => acc + c.length, 0);
+      while (this.preRollChunks.length > 1 && currentPreRollSamples - this.preRollChunks[0].length >= this.maxPreRollSamples) {
+        const removed = this.preRollChunks.shift();
+        if (removed) currentPreRollSamples -= removed.length;
       }
       return null;
     }
@@ -448,8 +450,8 @@ export class RealTimeVAD {
    */
   public forceFlush(): VADSegmentResult | null {
     const totalSamples = this.bufferChunks.reduce((acc, c) => acc + c.length, 0);
-    // At least 180ms of audio (2880 samples at 16kHz) and speech was detected
-    if (totalSamples >= 2880 && (this.isSpeaking || this.bufferChunks.length > 0)) {
+    // At least 100ms of audio (1600 samples at 16kHz) and speech was active or buffered
+    if (totalSamples >= 1600 && (this.isSpeaking || this.bufferChunks.length > 0)) {
       const merged = new Int16Array(totalSamples);
       let offset = 0;
       for (const c of this.bufferChunks) {

@@ -71,6 +71,7 @@ export class WindowManager {
       hiddenInMissionControl: true,
       type: 'panel',
       resizable: false,
+      movable: true,
       minimizable: false,
       maximizable: false,
       fullscreenable: false,
@@ -126,6 +127,7 @@ export class WindowManager {
       titleBarStyle: 'hiddenInset',
       backgroundColor: '#0d0d0f',
       show: false,
+      movable: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.cjs'),
         contextIsolation: true,
@@ -188,6 +190,13 @@ export class WindowManager {
       width: bounds.width,
       height: targetHeight,
     });
+  }
+
+  public moveWindowBy(target: 'overlay' | 'settings', deltaX: number, deltaY: number): void {
+    const win = target === 'overlay' ? this.overlayWindow : this.settingsWindow;
+    if (!win || win.isDestroyed()) return;
+    const [x, y] = win.getPosition();
+    win.setPosition(Math.round(x + deltaX), Math.round(y + deltaY), false);
   }
 
   public moveOverlayBy(deltaX: number, deltaY: number): void {

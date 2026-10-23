@@ -254,11 +254,17 @@ export interface CluelyAPI {
   // Window control
   setOverlayHeight: (height: number) => Promise<void>;
   moveWindow: (deltaX: number, deltaY: number) => Promise<void>;
+  dragWindowMove?: (target: 'overlay' | 'settings', deltaX: number, deltaY: number) => void;
   openSettings: (tab?: string) => Promise<void>;
   onSettingsNavigateTab?: (callback: (tab: string) => void) => () => void;
   toggleOverlay: () => Promise<void>;
   setUndetectability: (val: boolean) => Promise<void>;
   saveAIConfig: (config: AIProviderConfig) => Promise<void>;
+
+  // Session lifecycle control
+  startSession?: () => Promise<void>;
+  stopSession?: () => Promise<void>;
+  clearSessionChat?: () => Promise<void>;
 
   // Shortcuts
   onShortcut: (action: ShortcutAction, callback: () => void) => () => void;

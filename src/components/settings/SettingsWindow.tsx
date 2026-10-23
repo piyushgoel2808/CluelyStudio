@@ -31,6 +31,7 @@ import {
   History,
 } from 'lucide-react';
 import { useAppState } from '../../hooks/useAppState';
+import { useWindowDrag } from '../../hooks/useWindowDrag';
 import { SessionsHistoryView } from './SessionsHistoryView';
 import {
   CompanionServerInfo,
@@ -44,6 +45,7 @@ import {
 export const SettingsWindow: React.FC = () => {
   const { state, patchState } = useAppState();
   const [activeTab, setActiveTab] = useState<string>('general');
+  const { onMouseDown: handleSettingsDrag } = useWindowDrag('settings');
 
   // Mic test state
   const [isTestingMic, setIsTestingMic] = useState(false);
@@ -433,13 +435,25 @@ export const SettingsWindow: React.FC = () => {
   return (
     <div className="flex flex-col h-screen w-screen bg-[#101012] text-white font-sans overflow-hidden select-none">
       {/* Top Window Title (Exact v2.1.24: "Cluely Settings") */}
-      <div className="text-center py-2.5 border-b border-white/[0.08] bg-[#141416] shrink-0">
-        <span className="text-[13px] text-neutral-400 font-medium">Cluely Settings</span>
+      <div
+        onMouseDown={handleSettingsDrag}
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        className="text-center py-2.5 border-b border-white/[0.08] bg-[#141416] shrink-0 cursor-grab active:cursor-grabbing"
+      >
+        <span className="text-[13px] text-neutral-400 font-medium pointer-events-none">Cluely Settings</span>
       </div>
 
       {/* Horizontal 9-Tab Navigation Bar */}
-      <div className="bg-[#18181b] border-b border-white/[0.08] px-6 py-2.5 flex items-center justify-center shrink-0">
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-4xl">
+      <div
+        onMouseDown={handleSettingsDrag}
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        className="bg-[#18181b] border-b border-white/[0.08] px-6 py-2.5 flex items-center justify-center shrink-0 cursor-grab active:cursor-grabbing"
+      >
+        <div
+          data-no-drag="true"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-4xl cursor-default"
+        >
           {navTabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -447,6 +461,8 @@ export const SettingsWindow: React.FC = () => {
               <button
                 key={tab.id}
                 type="button"
+                data-no-drag="true"
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex flex-col items-center justify-center py-1.5 px-3.5 rounded-lg text-[11px] font-medium transition cursor-pointer shrink-0 min-w-[76px] ${
                   isActive

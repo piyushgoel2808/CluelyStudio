@@ -75,6 +75,32 @@ ipcMain.handle(
   }
 );
 
+ipcMain.on('window:drag-move', (_event, { target, deltaX, deltaY }: { target: 'overlay' | 'settings'; deltaX: number; deltaY: number }) => {
+  windowManager.moveWindowBy(target, deltaX, deltaY);
+});
+
+ipcMain.handle('session:start', async (): Promise<void> => {
+  store.startSession();
+  try {
+    await audioEngine.start();
+  } catch (err) {
+    console.warn('[Main] audioEngine.start on session:start warning:', err);
+  }
+});
+
+ipcMain.handle('session:stop', async (): Promise<void> => {
+  store.stopSession();
+  try {
+    await audioEngine.stop();
+  } catch (err) {
+    console.warn('[Main] audioEngine.stop on session:stop warning:', err);
+  }
+});
+
+ipcMain.handle('session:clear', async (): Promise<void> => {
+  store.clearCurrentSessionChat();
+});
+
 ipcMain.handle('window:open-settings', async (_event, tab?: string): Promise<void> => {
   windowManager.showSettings(tab);
 });

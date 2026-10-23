@@ -9,13 +9,15 @@ import {
   AIStreamRequest,
   MemoryItem,
   TranscriptSegment,
-  SessionAssistEvent,
 } from '../../src/types/ipc';
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 export class AIRouter {
   private activeStreams: Map<string, AbortController> = new Map();
-  private lastConsumedTranscriptId: string | null = null;
-  private lastConsumedTimestamp: number = 0;
 
   /**
    * Cancel an in-flight AI stream
@@ -57,21 +59,19 @@ export class AIRouter {
     const controller = new AbortController();
     this.activeStreams.set(request.requestId, controller);
 
-    // FIX 1: If this is a voice assist, wait for in-flight ASR transcription tasks to commit to store!
-    if (triggerSource === 'voice') {
-      try {
-        await transcriptionService.waitForPendingTranscriptions(1500);
-      } catch (waitErr) {
-        console.warn('[AIRouter] waitForPendingTranscriptions error, continuing:', waitErr);
-      }
+    // STEP 2 & 4: Always await pending transcription promises so in-flight Sherpa-ONNX
+    // chunks are completely committed to store before reading transcripts!
+    try {
+      await transcriptionService.awaitPendingTranscriptions(3000);
+    } catch (waitErr) {
+      console.warn('[AIRouter] awaitPendingTranscriptions error, continuing:', waitErr);
     }
 
-    // Retrieve transcripts: combine activeSession transcripts, request.transcript, and store transcripts
-    const stateTranscripts = store.getState().transcripts || [];
-    const sessions = store.getState().pastSessions || [];
-    const activeSession = sessions.find((s) => s.id === store.getState().currentSessionId) || sessions[0];
-    const sessionChat = activeSession?.assistEvents || [];
+    // Ensure active session exists so assist events are ALWAYS archived
+    const activeSession = store.ensureActiveSession();
 
+    // Retrieve all chronological transcripts
+    const stateTranscripts = store.getState().transcripts || [];
     const candidateSegments: TranscriptSegment[] = [
       ...(activeSession?.transcripts || []),
       ...(request.transcript || []),
@@ -85,80 +85,65 @@ export class AIRouter {
         segmentMap.set(key, seg);
       }
     }
-    const combinedTranscripts = Array.from(segmentMap.values());
-
-    // Sort chronologically (oldest to newest)
-    combinedTranscripts.sort((a, b) => {
+    const allSegments = Array.from(segmentMap.values());
+    allSegments.sort((a, b) => {
       const timeA = a.timestamp || a.startTimeMs || 0;
       const timeB = b.timestamp || b.startTimeMs || 0;
       return timeA - timeB;
     });
 
-    // FIX 2: Deterministic Spoken Segment Cursor Slicing
-    let unansweredSpeechBlock: TranscriptSegment[] = [];
+    // STEP 4: Gather the Full Question Without Cutting It Midway
+    const cursorTs = store.getQuestionCursorTimestamp();
+    let unansweredSegments = allSegments.filter(
+      (t) => (t.timestamp || t.startTimeMs || 0) >= cursorTs
+    );
 
-    if (triggerSource === 'voice') {
-      if (this.lastConsumedTranscriptId) {
-        const lastIdx = combinedTranscripts.findIndex(
-          (s) => s.id === this.lastConsumedTranscriptId
-        );
-        if (lastIdx !== -1) {
-          // Check if previous segment ended less than 4 seconds before next segment (overlap buffer)
-          const lastSeg = combinedTranscripts[lastIdx];
-          const nextSeg = combinedTranscripts[lastIdx + 1];
-          const hasOverlap =
-            nextSeg &&
-            lastSeg &&
-            Math.abs((nextSeg.timestamp || 0) - (lastSeg.timestamp || 0)) < 4000;
-          const startSliceIdx = hasOverlap ? lastIdx : lastIdx + 1;
-          unansweredSpeechBlock = combinedTranscripts.slice(startSliceIdx);
-        } else if (this.lastConsumedTimestamp > 0) {
-          unansweredSpeechBlock = combinedTranscripts.filter(
-            (s) => (s.timestamp || s.startTimeMs || 0) >= this.lastConsumedTimestamp - 4000
-          );
+    // Contiguous Question Lookback Guard:
+    // If the preceding segment ended within 10,000ms (10 seconds) of the start of unansweredSegments,
+    // include it too so a long multi-sentence question split across chunks is 100% captured!
+    if (unansweredSegments.length > 0) {
+      const firstUnanswered = unansweredSegments[0];
+      const firstIdx = allSegments.findIndex((s) => s.id === firstUnanswered.id);
+      if (firstIdx > 0) {
+        let currStartIdx = firstIdx;
+        while (currStartIdx > 0) {
+          const prevSeg = allSegments[currStartIdx - 1];
+          const currSeg = allSegments[currStartIdx];
+          const prevEnd = prevSeg.endTimeMs || prevSeg.timestamp || 0;
+          const currStart = currSeg.startTimeMs || currSeg.timestamp || 0;
+          if (currStart - prevEnd <= 10000 || Math.abs(currStart - (prevSeg.timestamp || 0)) <= 10000) {
+            currStartIdx--;
+          } else {
+            break;
+          }
         }
-      }
-
-      // Fallback: If no cursor or if unanswered block is empty, take the last 10 segments
-      if (unansweredSpeechBlock.length === 0) {
-        unansweredSpeechBlock = combinedTranscripts.slice(-10);
-      }
-
-      // Update cursor immediately at request start so speech spoken during generation is preserved!
-      if (unansweredSpeechBlock.length > 0) {
-        const lastSegInBlock = unansweredSpeechBlock[unansweredSpeechBlock.length - 1];
-        this.lastConsumedTranscriptId = lastSegInBlock.id;
-        this.lastConsumedTimestamp =
-          lastSegInBlock.timestamp || lastSegInBlock.startTimeMs || Date.now();
-      }
-    } else {
-      // Trigger source is 'typed': do NOT advance lastConsumedTranscriptId!
-      unansweredSpeechBlock = combinedTranscripts.slice(-10);
-    }
-
-    // Derive a clean question title for recording in session history
-    let questionSummary = userTypedPrompt;
-    if (triggerSource === 'voice' || !questionSummary) {
-      const questionLikeSeg = [...unansweredSpeechBlock]
-        .reverse()
-        .find((s) => s.text.includes('?') || s.role === 'them');
-      if (questionLikeSeg) {
-        questionSummary = questionLikeSeg.text;
-      } else {
-        const lastSeg =
-          unansweredSpeechBlock[unansweredSpeechBlock.length - 1] ||
-          combinedTranscripts[combinedTranscripts.length - 1];
-        questionSummary = lastSeg ? lastSeg.text : 'Live Spoken Question';
+        unansweredSegments = allSegments.slice(currStartIdx);
       }
     }
+
+    // Fallback: If unanswered block is still empty, take the last 8 segments
+    if (unansweredSegments.length === 0) {
+      unansweredSegments = allSegments.slice(-8);
+    }
+
+    // Advance cursor timestamp ONLY after capturing unansweredSegments
+    if (triggerSource === 'voice') {
+      store.setQuestionCursorTimestamp(Date.now());
+    }
+
+    // Derive authentic full question text
+    const fullQuestionText =
+      triggerSource === 'voice' || !userTypedPrompt
+        ? unansweredSegments.map((s) => s.text).join(' ') || 'Live Spoken Question'
+        : userTypedPrompt;
 
     const usedMemories = await memoryBrain.retrieveRelevantMemories(
-      userTypedPrompt || questionSummary,
-      combinedTranscripts,
+      userTypedPrompt || fullQuestionText,
+      allSegments,
       6
     );
 
-    // Resolve screenshot image: only capture screen if attached or live screen is active
+    // Screen vision snapshot if attached or live screen active
     let imageBase64: string | null = null;
     if (request.imageDataUrl) {
       imageBase64 = request.imageDataUrl.replace(/^data:image\/[a-z]+;base64,/, '');
@@ -175,10 +160,22 @@ export class AIRouter {
 
     // Build assembled system instruction & knowledge context
     const systemPrompt = this.buildSystemPrompt(activeMode.contextPrompt, activeMode.files, usedMemories);
+
+    // Build True Multi-Turn History Messages (Last 6 Q&A assist events from activeSession)
+    const historyMessages: ChatHistoryMessage[] = [];
+    const pastAssists = (activeSession.assistEvents || []).slice(-6);
+    for (const ev of pastAssists) {
+      if (ev.userPrompt && ev.aiResponse) {
+        historyMessages.push({ role: 'user', content: ev.userPrompt });
+        historyMessages.push({ role: 'assistant', content: ev.aiResponse });
+      }
+    }
+
+    // Build Current User Message Content
     const userMessageContent = this.buildUserPrompt(
       userTypedPrompt,
-      unansweredSpeechBlock,
-      sessionChat,
+      unansweredSegments,
+      allSegments,
       triggerSource
     );
 
@@ -202,7 +199,7 @@ export class AIRouter {
     const sendDone = () => {
       if (accumulatedResponse.trim()) {
         // If response starts with **Question:**, extract the phonetically repaired question for session history title!
-        let finalTitle = questionSummary;
+        let finalTitle = fullQuestionText;
         const qMatch = accumulatedResponse.match(/^\*\*Question:\*\*\s*(.+?)(\n|$)/i);
         if (qMatch && qMatch[1]?.trim()) {
           finalTitle = qMatch[1].trim();
@@ -245,64 +242,57 @@ export class AIRouter {
     };
 
     try {
-      // Helper to determine optimal Ollama model
       const getOllamaModel = () => {
-        if (imageBase64) {
-          // qwen3-vl is installed locally and handles multimodal vision
-          return 'qwen3-vl';
-        }
-        if (model && model !== 'gemini-2.5-flash' && model !== 'gpt-4o' && model !== 'claude-3-5-sonnet-20241022') {
-          return model;
-        }
+        if (model && model !== 'default') return model;
+        if (aiConfig.activeModel && aiConfig.activeModel !== 'default') return aiConfig.activeModel;
         return 'nemotron-mini';
       };
 
-      const hasGemini = Boolean(aiConfig.apiKeys.gemini?.trim());
-      const hasOpenAI = Boolean(aiConfig.apiKeys.openai?.trim());
-      const hasAnthropic = Boolean(aiConfig.apiKeys.anthropic?.trim());
-      const hasGroq = Boolean(aiConfig.apiKeys.groq?.trim());
-
-      if (provider === 'gemini' && hasGemini) {
+      if (provider === 'gemini') {
         await this.streamGemini(
           aiConfig.apiKeys.gemini,
           model || 'gemini-2.5-flash',
           systemPrompt,
+          historyMessages,
           userMessageContent,
           imageBase64,
           controller.signal,
           sendChunk
         );
-      } else if (provider === 'openai' && hasOpenAI) {
+      } else if (provider === 'openai') {
         await this.streamOpenAI(
           aiConfig.apiKeys.openai,
           model || 'gpt-4o',
           systemPrompt,
+          historyMessages,
           userMessageContent,
           imageBase64,
           controller.signal,
           sendChunk
         );
-      } else if (provider === 'anthropic' && hasAnthropic) {
+      } else if (provider === 'anthropic') {
         await this.streamAnthropic(
           aiConfig.apiKeys.anthropic,
           model || 'claude-3-5-sonnet-20241022',
           systemPrompt,
+          historyMessages,
           userMessageContent,
           imageBase64,
           controller.signal,
           sendChunk
         );
-      } else if (provider === 'groq' && hasGroq) {
+      } else if (provider === 'groq') {
         await this.streamGroq(
           aiConfig.apiKeys.groq,
           model || 'llama-3.3-70b-versatile',
           systemPrompt,
+          historyMessages,
           userMessageContent,
           controller.signal,
           sendChunk
         );
       } else {
-        // Default / Offline: Use Local Ollama (nemotron-mini, qwen3-vl, llama3.1, deepseek-r1)
+        // Default / Offline: Use Local Ollama (nemotron-mini, gemma4:e4b, qwen3-vl, llama3.1, deepseek-r1)
         const targetOllamaModel = getOllamaModel();
         console.log(`[AIRouter] Routing to Local Ollama model: ${targetOllamaModel} (provider=${provider})`);
 
@@ -310,6 +300,7 @@ export class AIRouter {
           aiConfig.apiKeys.ollamaUrl || 'http://127.0.0.1:11434',
           targetOllamaModel,
           systemPrompt,
+          historyMessages,
           userMessageContent,
           imageBase64,
           controller.signal,
@@ -336,34 +327,33 @@ export class AIRouter {
 
     parts.push(`You are Cluely, an ultra-smart real-time stealth teleprompter and copilot assisting the user live during meetings, interviews, and work sessions.`);
     parts.push(`CRITICAL BEHAVIORAL DIRECTIVES:
-1. NO THINKING PROCESS OR META-CHATTER:
-- NEVER output reasoning steps, thinking blocks, <think> tags, or conversational chatter like "Thinking Process:", "Here is what you can say:", "Sure!", or "Let me explain".
-- Output ONLY the final, polished answer directly, starting with the very first word.
-- SPEED IS ESSENTIAL: The user is in a live conversation and needs instant teleprompter-speed responses.
+1. READ THE ENTIRE LIVE QUESTION & ANSWER COMPLETELY:
+- Read the entire live transcript question from start to finish—if it has multiple sentences, parts, or follow-ups, answer EVERY part completely.
+- NEVER cut off your answer halfway. Deliver a complete, satisfying, structured response.
 
-2. FIRST-PERSON EXPERT PERSONA:
-- Answer directly from the user's perspective as the candidate/engineer ("I designed...", "In our architecture...", "We implemented...").
-- Answer the actual question or technical topic directly, comprehensively, and authoritatively!
-- If the interviewer or speaker asks a question (e.g. about project architecture, NewsLens AI, hallucination handling, evaluation metrics, file paths, or design tradeoffs), deliver the real technical explanation from the mode instructions, files, and session discussion.
+2. MULTI-TURN CONVERSATION MEMORY:
+- Use the prior conversation turns provided in this session to maintain full context for follow-up questions.
+- NEVER repeat or re-answer previous questions from earlier in the session. Build naturally upon what was already discussed.
+
+3. FIRST-PERSON EXPERT PERSONA:
+- Answer directly from the candidate/engineer's perspective ("I designed...", "In our architecture...", "We implemented...").
+- Deliver the real technical explanation from the active mode instructions, verified codebase files, and session discussion.
 - NEVER output evasive counter-questions or generic confirmation requests. Give the direct answer immediately.
-- If the user asks for code, programming, or an implementation, provide the clean, correct, working code snippet directly with a 1-sentence explanation.
-- If the user asks for a "Recap" or summary, provide a concise 2-3 sentence overview of what was just discussed or seen on screen.
-- If the user asks for "Follow-up questions", provide 2-3 sharp, thoughtful questions to bounce back to the meeting participants.
+- If code is requested, provide clean, idiomatic code with meaningful variable names.
 
-3. TWO-STEP OUTPUT FORMAT FOR SPOKEN SPEECH ASSIST:
-- When answering voice assistance requests, you MUST start your response with a single bold header line identifying the repaired question:
+4. MANDATORY TWO-STEP OUTPUT FORMAT FOR LIVE SPEECH ASSIST:
+- When answering live spoken speech, you MUST start your response with a single bold header line identifying the phonetically repaired question:
   **Question:** <1-line phonetically corrected question deduced from the speech block>
-  followed on the next line by your direct, authoritative first-person answer!
+  followed on the next line by your direct, authoritative first-person answer ready to speak aloud!
 - If the user explicitly typed a direct prompt, answer the prompt directly without the Question header.
 
-4. CONTEXTUAL & PHONETIC SPEECH REPAIR (CRITICAL):
+5. ASR PHONETIC & CONTEXTUAL SPEECH REPAIR:
 - Automated speech recognition (ASR) frequently mishears technical terms, acronyms, or accented Hindi/English speech.
-  * Examples: "news lens" / "noose lens" -> "NewsLens AI", "be m 25" / "pm 25" -> "BM25", "loosination" -> "hallucination", "rag as" -> "RAGAS", "cross in coder" -> "cross-encoder", "vector db" -> "Vector Database", "dock her" -> "Docker".
-- Use the Mode Instructions, attached project files, and ongoing session history to deduce the real technical terms.
-- Silently repair any misheard terms and answer the intended question authoritatively. Never mention transcription errors or ask clarifying questions about misheard terms.`);
+  * Examples: "news lens" / "noose lens" -> "NewsLens AI", "be m 25" -> "BM25", "loosination" -> "hallucination", "rag as" -> "RAGAS", "cross in coder" -> "cross-encoder", "artikil chunks" -> "article_chunks_v2 (Qdrant MRL)", "dock her" -> "Docker".
+- Silently repair any misheard terms against the Active Mode Ground Truth and answer authoritatively. Never mention transcription errors.`);
 
     const outputLanguage = store.getState().outputLanguage || 'English';
-    parts.push(`5. LANGUAGE REQUIREMENT: Deliver the response in ${outputLanguage}. If the conversation is bilingual (Hinglish / Hindi), ensure the answer feels completely natural for the user to speak aloud.`);
+    parts.push(`6. LANGUAGE REQUIREMENT: Deliver the response in ${outputLanguage}. If the conversation is bilingual (Hinglish / Hindi), ensure the answer feels completely natural for the user to speak aloud.`);
 
     if (modeContextPrompt) {
       parts.push(`\n### ACTIVE MODE GROUND TRUTH & INSTRUCTIONS:\n${modeContextPrompt}`);
@@ -388,66 +378,49 @@ export class AIRouter {
 
   private buildUserPrompt(
     prompt: string,
-    unansweredSpeechBlock: TranscriptSegment[],
-    sessionChat: SessionAssistEvent[] = [],
-    triggerSource: 'typed' | 'voice' = 'voice'
+    unansweredSegments: TranscriptSegment[],
+    allSegments: TranscriptSegment[],
+    triggerSource: 'typed' | 'voice'
   ): string {
     const parts: string[] = [];
 
-    if (triggerSource === 'voice') {
-      // FIX 3: Enclose within <unanswered_live_speech_since_last_question>
-      parts.push(`<unanswered_live_speech_since_last_question>`);
-      for (const seg of unansweredSpeechBlock) {
+    // Earlier meeting dialogue for context (up to last 12 segments preceding the unanswered block)
+    const unansweredIds = new Set(unansweredSegments.map((s) => s.id));
+    const earlierSegments = allSegments
+      .filter((s) => !unansweredIds.has(s.id))
+      .slice(-12);
+
+    if (earlierSegments.length > 0) {
+      parts.push(`### EARLIER MEETING DIALOGUE (Last 12 turns for background context):`);
+      for (const seg of earlierSegments) {
         const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
-        parts.push(`[${seg.speakerLabel || roleDesc} - ${roleDesc}]: "${seg.text}"`);
-      }
-      parts.push(`</unanswered_live_speech_since_last_question>\n`);
-
-      parts.push(`### MANDATORY PHONETIC SPEECH REPAIR & QUESTION SYNTHESIS:
-1. DIALOGUE QUESTION SYNTHESIS:
-- Carefully analyze the full <unanswered_live_speech_since_last_question> block above spoken since the last ended question.
-- Synthesize the overarching technical question, challenge, or topic being evaluated across all conversational turns.
-- If the candidate ([Candidate (Me)]) spoke last or repeated/clarified the question, or if the interviewer spoke across multiple sentences, synthesize the complete question from the entire dialogue.
-- Ignore conversational filler like "thank you", "yeah", "okay", or trailing half-phrases.
-
-2. ASR PHONETIC & CONTEXTUAL ERROR REPAIR:
-- Real-time speech recognition often mishears technical terms, project names, and accented words.
-- Cross-reference every phonetically ambiguous word against:
-  * Active Mode Ground Truth (NewsLens-AI, Qdrant, IBM Docling, Qwen3-VL, RAGAS, BM25, Cross-Encoder, etc.)
-  * Attached Mode Files
-  * Prior Session Q&A Topics (see reference below)
-  * Personal Memory Brain
-- Silently deduce and repair what was intended (e.g., "noose lens" -> "NewsLens AI", "loosination" -> "hallucination", "be m 25" -> "BM25", "rag as" -> "RAGAS", "cross in coder" -> "cross-encoder").
-
-3. MANDATORY OUTPUT FORMAT:
-- You MUST begin your response with a single bold header line identifying the phonetically repaired question:
-  **Question:** <1-line phonetically corrected question deduced from the speech block>
-- Immediately followed on the next line by your direct, authoritative first-person answer ready to speak aloud in the interview!
-- Provide concrete codebase file paths, evaluation metrics, step-by-step instructions, and clean code as required by the mode.`);
-    } else {
-      // Trigger source is 'typed'
-      parts.push(`### CANDIDATE DIRECTIVE:\n${prompt}\n(Address this directive directly using the Active Mode ground truth and session context.)`);
-
-      if (unansweredSpeechBlock.length > 0) {
-        parts.push(`\n### RECENT CONVERSATION CONTEXT (For reference):`);
-        for (const seg of unansweredSpeechBlock) {
-          const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
-          parts.push(`[${seg.speakerLabel || roleDesc} - ${roleDesc}]: "${seg.text}"`);
-        }
-        parts.push(`---\n`);
-      }
-    }
-
-    // Previous Session History formatted as compact 1-line topic summaries at the bottom
-    if (sessionChat && sessionChat.length > 0) {
-      parts.push(`\n### PRIOR SESSION TURNS (For continuity & phonetic reference only - DO NOT RE-ANSWER):`);
-      const recentChat = sessionChat.slice(-5);
-      for (const turn of recentChat) {
-        const topic = turn.userPrompt.slice(0, 60);
-        const snippet = turn.aiResponse.replace(/\s+/g, ' ').slice(0, 100);
-        parts.push(`• [Prior Turn: "${topic}" -> "${snippet}..."]`);
+        parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
       }
       parts.push(`---\n`);
+    }
+
+    if (triggerSource === 'voice' || !prompt.trim()) {
+      parts.push(`### COMPLETE LIVE SPOKEN QUESTION / DIALOGUE TO ANSWER NOW:`);
+      for (const seg of unansweredSegments) {
+        const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
+        parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
+      }
+      parts.push(`\nINSTRUCTIONS FOR THIS TURN:
+1. Synthesize the overarching technical question from the ENTIRE live spoken dialogue above. If it spans multiple sentences or clauses, answer EVERY part thoroughly.
+2. Silently repair any phonetic ASR errors using the Active Mode ground truth and prior turns.
+3. Begin your response with:
+**Question:** <1-line phonetically corrected question deduced from the speech block>
+followed immediately by your authoritative, first-person answer ready to say out loud.`);
+    } else {
+      parts.push(`### CANDIDATE DIRECTIVE / QUESTION TO ANSWER NOW:\n${prompt.trim()}`);
+      if (unansweredSegments.length > 0) {
+        parts.push(`\n### ACCOMPANYING LIVE ROOM SPEECH:`);
+        for (const seg of unansweredSegments) {
+          const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
+          parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
+        }
+      }
+      parts.push(`\nAddress this directive directly using the Active Mode ground truth and session context.`);
     }
 
     return parts.join('\n');
@@ -460,6 +433,7 @@ export class AIRouter {
     apiKey: string,
     model: string,
     systemPrompt: string,
+    historyMessages: ChatHistoryMessage[],
     userPrompt: string,
     imageBase64: string | null,
     signal: AbortSignal,
@@ -469,22 +443,30 @@ export class AIRouter {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
-    const parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> = [];
+    const userParts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> = [];
     if (imageBase64) {
-      parts.push({
+      userParts.push({
         inline_data: {
           mime_type: 'image/jpeg',
           data: imageBase64,
         },
       });
     }
-    parts.push({ text: userPrompt });
+    userParts.push({ text: userPrompt });
+
+    const contents = [
+      ...historyMessages.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      })),
+      { role: 'user', parts: userParts },
+    ];
 
     const body = {
       system_instruction: {
         parts: [{ text: systemPrompt }],
       },
-      contents: [{ role: 'user', parts }],
+      contents,
       generationConfig: {
         temperature: 0.2,
         maxOutputTokens: 2048,
@@ -508,9 +490,7 @@ export class AIRouter {
         const json = JSON.parse(dataStr);
         const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) onChunk(text);
-      } catch {
-        // partial json ignored
-      }
+      } catch {}
     });
   }
 
@@ -521,6 +501,7 @@ export class AIRouter {
     apiKey: string,
     model: string,
     systemPrompt: string,
+    historyMessages: ChatHistoryMessage[],
     userPrompt: string,
     imageBase64: string | null,
     signal: AbortSignal,
@@ -537,13 +518,16 @@ export class AIRouter {
     }
     userContent.push({ type: 'text', text: userPrompt });
 
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user', content: userContent },
+    ];
+
     const body = {
       model,
       stream: true,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
+      messages,
       temperature: 0.2,
     };
 
@@ -579,6 +563,7 @@ export class AIRouter {
     apiKey: string,
     model: string,
     systemPrompt: string,
+    historyMessages: ChatHistoryMessage[],
     userPrompt: string,
     imageBase64: string | null,
     signal: AbortSignal,
@@ -599,12 +584,17 @@ export class AIRouter {
     }
     content.push({ type: 'text', text: userPrompt });
 
+    const messages = [
+      ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user', content },
+    ];
+
     const body = {
       model,
       system: systemPrompt,
       stream: true,
       max_tokens: 2048,
-      messages: [{ role: 'user', content }],
+      messages,
     };
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -640,19 +630,23 @@ export class AIRouter {
     apiKey: string,
     model: string,
     systemPrompt: string,
+    historyMessages: ChatHistoryMessage[],
     userPrompt: string,
     signal: AbortSignal,
     onChunk: (delta: string) => void
   ): Promise<void> {
     if (!apiKey) throw new Error('Groq API key is required');
 
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user', content: userPrompt },
+    ];
+
     const body = {
       model,
       stream: true,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
+      messages,
       temperature: 0.2,
     };
 
@@ -682,12 +676,13 @@ export class AIRouter {
   }
 
   /**
-   * Ollama NDJSON Streaming
+   * Ollama NDJSON Streaming with True Multi-Turn History
    */
   private async streamOllama(
     baseUrl: string,
     model: string,
     systemPrompt: string,
+    historyMessages: ChatHistoryMessage[],
     userPrompt: string,
     imageBase64: string | null,
     signal: AbortSignal,
@@ -703,9 +698,6 @@ export class AIRouter {
       if (isVisionModel) {
         imagesToSend = [imageBase64];
       } else {
-        // Model is text-only (e.g. gemma4:e4b, nemotron-mini, llama3.1, deepseek-r1).
-        // Check if qwen3-vl or another vision model is installed for multimodal requests.
-        // If not, omit images to prevent Ollama from failing with HTTP 400!
         try {
           const tagsRes = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/tags`, { signal });
           if (tagsRes.ok) {
@@ -719,9 +711,7 @@ export class AIRouter {
               imagesToSend = [imageBase64];
             }
           }
-        } catch {
-          // Keep text-only model and omit images so text prompt still succeeds
-        }
+        } catch {}
       }
     }
 
@@ -737,6 +727,7 @@ export class AIRouter {
       model: activeModel,
       messages: [
         { role: 'system', content: systemPrompt },
+        ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
         userMessage,
       ],
       think: false, // Disables internal reasoning buffer so responses stream immediately
@@ -760,58 +751,57 @@ export class AIRouter {
       throw new Error(`Ollama error (${res.status}): ${err}`);
     }
 
-    if (!res.body) return;
+    if (!res.body) {
+      throw new Error('Ollama response body is empty');
+    }
+
     const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let pending = '';
-    let inThinkTag = false;
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
 
     while (true) {
-      if (signal.aborted) break;
-      const { done, value } = await reader.read();
+      const { value, done } = await reader.read();
       if (done) break;
 
-      pending += decoder.decode(value, { stream: true });
-      const lines = pending.split('\n');
-      pending = lines.pop() || '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
+        if (!line.trim()) continue;
         try {
-          const json = JSON.parse(trimmed);
-          // If chunk is reasoning/thinking tokens, suppress it from output
-          if (json.message?.thinking) {
-            continue;
-          }
-
-          let rawChunk = json.message?.content ?? json.response ?? '';
-          if (!rawChunk) continue;
-
-          // Strip <think>...</think> tags if present
-          if (rawChunk.includes('<think>')) {
-            inThinkTag = true;
-            rawChunk = rawChunk.split('<think>')[0];
-          }
-          if (inThinkTag) {
-            if (rawChunk.includes('</think>')) {
-              rawChunk = rawChunk.split('</think>')[1] || '';
-              inThinkTag = false;
-            } else {
-              rawChunk = '';
+          const json = JSON.parse(line);
+          // Only emit actual message content, ignore thinking steps
+          if (json.message?.content) {
+            let chunkText = json.message.content;
+            chunkText = chunkText.replace(/<think>[\s\S]*?<\/think>/gi, '');
+            if (chunkText) {
+              onChunk(chunkText);
             }
           }
-
-          if (rawChunk) {
-            onChunk(rawChunk);
+          if (json.done) {
+            return;
           }
         } catch {}
       }
     }
+
+    if (buffer.trim()) {
+      try {
+        const json = JSON.parse(buffer);
+        if (json.message?.content) {
+          let chunkText = json.message.content;
+          chunkText = chunkText.replace(/<think>[\s\S]*?<\/think>/gi, '');
+          if (chunkText) {
+            onChunk(chunkText);
+          }
+        }
+      } catch {}
+    }
   }
 
   /**
-   * Helper to consume standard text/event-stream responses
+   * Helper to consume Server-Sent Events (SSE) stream
    */
   private async consumeSSE(
     res: Response,
@@ -820,11 +810,12 @@ export class AIRouter {
   ): Promise<void> {
     if (!res.body) return;
     const reader = res.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder('utf-8');
     let buffer = '';
 
-    while (!signal.aborted) {
-      const { done, value } = await reader.read();
+    while (true) {
+      if (signal.aborted) break;
+      const { value, done } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -832,12 +823,14 @@ export class AIRouter {
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('data:')) {
-          const dataContent = trimmed.slice(5).trim();
-          onData(dataContent);
+        if (line.startsWith('data: ')) {
+          onData(line.slice(6));
         }
       }
+    }
+
+    if (buffer.startsWith('data: ')) {
+      onData(buffer.slice(6));
     }
   }
 }

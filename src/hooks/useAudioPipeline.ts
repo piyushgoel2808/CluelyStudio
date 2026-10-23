@@ -131,9 +131,16 @@ export function useAudioPipeline(state: AppState | null) {
           });
 
           if (existingIdx !== -1) {
-            const updated = [...prev];
-            updated[existingIdx] = newSegment;
-            return updated;
+            // Only overwrite if the existing segment was a partial preview of this utterance
+            if (prev[existingIdx].isPartial) {
+              const updated = [...prev];
+              updated[existingIdx] = newSegment;
+              return updated;
+            }
+            // If already finalized with same ID, ignore duplicate
+            if (prev[existingIdx].id === newSegment.id) {
+              return prev;
+            }
           }
 
           return [newSegment, ...prev];
@@ -203,7 +210,7 @@ export function useAudioPipeline(state: AppState | null) {
    * Force-flush pending speech from both Mic & System VAD instances and await
    * all in-flight ASR segment transcriptions. Used on Command+Enter before asking AI.
    */
-  const flushPendingSpeech = useCallback(async (): Promise<void> => {
+  const flushAndWaitForTranscription = useCallback(async (): Promise<void> => {
     const promises: Promise<unknown>[] = [];
 
     // Flush microphone VAD
@@ -224,6 +231,8 @@ export function useAudioPipeline(state: AppState | null) {
     const inFlight = Array.from(inFlightTranscriptionsRef.current);
     await Promise.allSettled([...promises, ...inFlight]);
   }, [handleVADResult]);
+
+  const flushPendingSpeech = flushAndWaitForTranscription;
 
   // Listen to raw system PCM chunks from audiotee
   useEffect(() => {
@@ -538,5 +547,6 @@ export function useAudioPipeline(state: AppState | null) {
     renameSpeaker,
     enrollMyVoice,
     flushPendingSpeech,
+    flushAndWaitForTranscription,
   };
 }

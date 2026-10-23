@@ -42,6 +42,7 @@ const OverlayApp: React.FC = () => {
   const {
     segments,
     flushPendingSpeech,
+    flushAndWaitForTranscription,
   } = useAudioPipeline(state);
 
   const {
@@ -101,6 +102,19 @@ const OverlayApp: React.FC = () => {
     }
   }, []);
 
+  // Listen for newChat shortcut (Cmd+R) to clear active AI response and context
+  useEffect(() => {
+    if (window.cluely && window.cluely.onShortcut) {
+      const unsub = window.cluely.onShortcut('newChat', () => {
+        setAiResponse('');
+        setLatestUserPrompt('');
+        setIsGenerating(false);
+        setTranscripts([]);
+      });
+      return unsub;
+    }
+  }, []);
+
   // Listen for real-time AI Stream Chunks (multimodal SSE)
   useEffect(() => {
     if (window.cluely && window.cluely.onAIStreamChunk) {
@@ -133,13 +147,17 @@ const OverlayApp: React.FC = () => {
       const resolvedTrigger: 'typed' | 'voice' = triggerSource || (prompt.trim() ? 'typed' : 'voice');
       const isVoiceAssist = resolvedTrigger === 'voice';
 
-      // FIX 1: If this is a voice assist, force-flush pending VAD speech from mic & system audio
+      // FIX 1 & STEP 2: Force-flush pending VAD speech from mic & system audio
       // and await in-flight ASR segment transcriptions BEFORE requesting AI stream!
-      if (isVoiceAssist && flushPendingSpeech) {
+      if (isVoiceAssist) {
         try {
-          await flushPendingSpeech();
+          if (flushAndWaitForTranscription) {
+            await flushAndWaitForTranscription();
+          } else if (flushPendingSpeech) {
+            await flushPendingSpeech();
+          }
         } catch (flushErr) {
-          console.warn('[OverlayApp] flushPendingSpeech error, continuing:', flushErr);
+          console.warn('[OverlayApp] flush speech error, continuing:', flushErr);
         }
       }
 
@@ -201,7 +219,26 @@ const OverlayApp: React.FC = () => {
         attachedScreenshots={attachedScreenshots}
         onRemoveScreenshot={removeScreenshot}
         onSnapScreenshot={snapManualScreenshot}
+        onToggleLiveScreen={() => patchState({ isLiveScreenActive: !isLiveScreenActive })}
+        onToggleUndetectability={() => {
+          const val = !state?.undetectability;
+          window.cluely?.setUndetectability?.(val);
+          patchState({ undetectability: val });
+        }}
         onToggleSession={toggleSession}
+        onStartSession={async () => {
+          if (window.cluely?.startSession) await window.cluely.startSession();
+          else toggleSession();
+        }}
+        onStopSession={async () => {
+          if (window.cluely?.stopSession) await window.cluely.stopSession();
+          else toggleSession();
+        }}
+        onClearSessionChat={async () => {
+          if (window.cluely?.clearSessionChat) await window.cluely.clearSessionChat();
+          setAiResponse('');
+          setIsGenerating(false);
+        }}
         onOpenSettings={(tab?: string) => window.cluely?.openSettings(tab)}
         onSelectMode={(modeId: string) => patchState({ activeModeId: modeId })}
         usedMemories={usedMemories}

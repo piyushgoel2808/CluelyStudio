@@ -33,6 +33,14 @@ const api: CluelyAPI = {
   moveWindow: (deltaX: number, deltaY: number) =>
     ipcRenderer.invoke('window:move', deltaX, deltaY),
 
+  dragWindowMove: (target: 'overlay' | 'settings', deltaX: number, deltaY: number) => {
+    ipcRenderer.send('window:drag-move', { target, deltaX, deltaY });
+  },
+
+  startSession: () => ipcRenderer.invoke('session:start'),
+  stopSession: () => ipcRenderer.invoke('session:stop'),
+  clearSessionChat: () => ipcRenderer.invoke('session:clear'),
+
   openSettings: (tab?: string) => ipcRenderer.invoke('window:open-settings', tab),
 
   onSettingsNavigateTab: (callback: (tab: string) => void) => {

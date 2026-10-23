@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { AppState, CluelyMode } from '../../types/ipc';
 import { AttachedScreenshot } from '../../hooks/useLiveScreen';
+import { useWindowDrag } from '../../hooks/useWindowDrag';
 
 interface FloatingHudProps {
   state: AppState | null;
@@ -51,6 +52,7 @@ export const FloatingHud: React.FC<FloatingHudProps> = ({
   onOpenDrawer,
   onOpenModesModal,
 }) => {
+  const { onMouseDown: handleOverlayDrag } = useWindowDrag('overlay');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isHoveredSubmit, setIsHoveredSubmit] = useState(false);
 
@@ -84,7 +86,11 @@ export const FloatingHud: React.FC<FloatingHudProps> = ({
   const isExpanded = Boolean(state?.overlayExpanded);
 
   return (
-    <div className="w-[680px] rounded-[22px] overflow-hidden border border-white/[0.16] shadow-[0_24px_60px_rgba(0,0,0,0.65)] backdrop-blur-2xl transition-all select-none">
+    <div
+      onMouseDown={handleOverlayDrag}
+      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      className="w-[680px] rounded-[22px] overflow-hidden border border-white/[0.16] shadow-[0_24px_60px_rgba(0,0,0,0.65)] backdrop-blur-2xl transition-all select-none cursor-grab active:cursor-grabbing"
+    >
       {/* Attached Context Preview Chips */}
       {attachedScreenshots.length > 0 && (
         <div className="bg-[#5f5f62]/90 px-4 py-1.5 flex items-center gap-2 overflow-x-auto border-b border-white/[0.08]">

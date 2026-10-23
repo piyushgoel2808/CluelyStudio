@@ -349,10 +349,102 @@ export class DomainStore {
   private listeners: Set<StateListener> = new Set();
   private isSaving: boolean = false;
   private pendingSave: boolean = false;
+  private activeSessionId: string | null = null;
+  private questionCursorTimestamp: number = 0;
 
   constructor() {
     this.filePath = path.join(app.getPath('userData'), 'cluely-studio-state.json');
     this.state = this.loadInitialState();
+    this.activeSessionId = this.state.currentSessionId || null;
+    this.questionCursorTimestamp = Date.now() - 5000;
+  }
+
+  public getActiveSessionId(): string | null {
+    return this.activeSessionId || this.state.currentSessionId || null;
+  }
+
+  public getQuestionCursorTimestamp(): number {
+    return this.questionCursorTimestamp;
+  }
+
+  public setQuestionCursorTimestamp(ts: number): void {
+    this.questionCursorTimestamp = ts;
+  }
+
+  public startSession(): MeetingSession {
+    const sessionId = `sess_${Date.now()}`;
+    const newSession: MeetingSession = {
+      id: sessionId,
+      title: 'Live Meeting Session',
+      startTime: Date.now(),
+      durationSeconds: 0,
+      status: 'active',
+      transcripts: [],
+      assistEvents: [],
+    };
+    this.activeSessionId = sessionId;
+    this.questionCursorTimestamp = Date.now() - 1000;
+
+    const currentPast = Array.isArray(this.state.pastSessions) ? this.state.pastSessions : DEFAULT_PAST_SESSIONS;
+    const sessions = [newSession, ...currentPast];
+    this.patchState({
+      isSessionActive: true,
+      currentSessionId: sessionId,
+      transcripts: [],
+      pastSessions: sessions,
+    });
+    return newSession;
+  }
+
+  public stopSession(): void {
+    const currentId = this.getActiveSessionId();
+    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const activeSession = sessions.find((s) => s.id === currentId);
+    if (activeSession) {
+      activeSession.status = 'completed';
+      activeSession.durationSeconds = Math.max(1, Math.round((Date.now() - activeSession.startTime) / 1000));
+    }
+    this.patchState({
+      isSessionActive: false,
+      pastSessions: sessions,
+    });
+  }
+
+  public ensureActiveSession(): MeetingSession {
+    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    let active = sessions.find((s) => s.id === this.getActiveSessionId());
+    if (!active || active.status === 'completed') {
+      active = {
+        id: `sess_${Date.now()}`,
+        title: 'Live Meeting Session',
+        startTime: Date.now(),
+        durationSeconds: 0,
+        status: 'active',
+        transcripts: [],
+        assistEvents: [],
+      };
+      sessions.unshift(active);
+      this.activeSessionId = active.id;
+      this.patchState({
+        currentSessionId: active.id,
+        pastSessions: sessions,
+      });
+    }
+    return active;
+  }
+
+  public clearCurrentSessionChat(): void {
+    const currentId = this.getActiveSessionId();
+    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const activeSession = sessions.find((s) => s.id === currentId);
+    if (activeSession) {
+      activeSession.assistEvents = [];
+    }
+    this.questionCursorTimestamp = Date.now();
+    this.patchState({
+      transcripts: [],
+      pastSessions: sessions,
+    });
   }
 
   private loadInitialState(): AppState {
@@ -462,23 +554,7 @@ export class DomainStore {
     modeName?: string;
     triggerSource?: 'typed' | 'voice';
   }): void {
-    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
-    let activeSession = sessions.find((s) => s.id === this.state.currentSessionId);
-
-    if (!activeSession) {
-      activeSession = {
-        id: `sess_${Date.now()}`,
-        title: 'Active Meeting Session',
-        startTime: Date.now(),
-        durationSeconds: 0,
-        transcripts: [],
-        assistEvents: [],
-        status: 'active',
-      };
-      sessions.unshift(activeSession);
-      this.patchState({ currentSessionId: activeSession.id });
-    }
-
+    const activeSession = this.ensureActiveSession();
     const elapsedMs = Math.max(0, Date.now() - activeSession.startTime);
     const totalSec = Math.floor(elapsedMs / 1000);
     const mins = Math.floor(totalSec / 60);
@@ -497,6 +573,13 @@ export class DomainStore {
     };
 
     activeSession.assistEvents.push(newAssistEvent);
+    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const idx = sessions.findIndex((s) => s.id === activeSession.id);
+    if (idx !== -1) {
+      sessions[idx] = activeSession;
+    } else {
+      sessions.unshift(activeSession);
+    }
     this.patchState({ pastSessions: sessions });
   }
 
@@ -509,26 +592,21 @@ export class DomainStore {
 
       // Record to active meeting session
       const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
-      let activeSession = sessions.find((s) => s.id === this.state.currentSessionId);
+      let activeSession = sessions.find((s) => s.id === this.getActiveSessionId());
       if (!activeSession && this.state.isSessionActive) {
-        activeSession = {
-          id: `sess_${Date.now()}`,
-          title: 'Active Meeting Session',
-          startTime: Date.now(),
-          durationSeconds: 0,
-          transcripts: [],
-          assistEvents: [],
-          status: 'active',
-        };
-        sessions.unshift(activeSession);
+        activeSession = this.ensureActiveSession();
       }
 
       if (activeSession) {
         activeSession.transcripts.push(segment);
-        activeSession.durationSeconds = Math.round((Date.now() - activeSession.startTime) / 1000);
-        if (activeSession.title === 'Active Meeting Session' && activeSession.transcripts.length >= 2) {
+        activeSession.durationSeconds = Math.max(1, Math.round((Date.now() - activeSession.startTime) / 1000));
+        if (activeSession.title === 'Live Meeting Session' && activeSession.transcripts.length >= 2) {
           const firstSnippet = activeSession.transcripts[0].text.slice(0, 35);
-          activeSession.title = firstSnippet ? `${firstSnippet}...` : 'Active Meeting Session';
+          activeSession.title = firstSnippet ? `${firstSnippet}...` : 'Live Meeting Session';
+        }
+        const sIdx = sessions.findIndex((s) => s.id === activeSession.id);
+        if (sIdx !== -1) {
+          sessions[sIdx] = activeSession;
         }
       }
 

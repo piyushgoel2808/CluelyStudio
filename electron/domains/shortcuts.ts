@@ -18,6 +18,7 @@ export class ShortcutManager {
         windowManager.sendToOverlay('shortcut:ask-cluely');
       },
       newChat: () => {
+        store.clearCurrentSessionChat();
         windowManager.sendToOverlay('shortcut:new-chat');
       },
       openSettings: () => {
