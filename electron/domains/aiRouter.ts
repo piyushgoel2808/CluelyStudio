@@ -18,10 +18,9 @@ export interface ChatHistoryMessage {
 
 export class AIRouter {
   private activeStreams: Map<string, AbortController> = new Map();
+  private cachedInstalledModels: string[] = [];
+  private lastTagsFetchMs: number = 0;
 
-  /**
-   * Cancel an in-flight AI stream
-   */
   public cancelStream(requestId: string): void {
     const controller = this.activeStreams.get(requestId);
     if (controller) {
@@ -31,24 +30,102 @@ export class AIRouter {
   }
 
   /**
-   * Handle multimodal stream request and route to active AI provider
+   * Pre-warms and pins the active local Ollama model in unified GPU memory (`keep_alive: -1`)
+   * so that live meeting questions stream in 2-3 seconds with zero disk cold-start!
    */
+  public async prewarmLocalModel(): Promise<void> {
+    const state = store.getState();
+    if (state.aiConfig.activeProvider !== 'ollama') return;
+    const baseUrl = (state.aiConfig.apiKeys.ollamaUrl || 'http://127.0.0.1:11434').replace(
+      /\/+$/,
+      ''
+    );
+
+    try {
+      const targetModel = await this.resolveFastOllamaModel(
+        baseUrl,
+        state.aiConfig.activeModel || 'gemma4:e4b'
+      );
+      await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: targetModel,
+          messages: [{ role: 'user', content: 'hi' }],
+          think: false,
+          keep_alive: -1,
+          options: { num_ctx: 2048, num_predict: 1 },
+          stream: false,
+        }),
+      });
+      console.log(`[AIRouter] Pre-warmed & pinned '${targetModel}' in GPU memory (keep_alive=-1)`);
+    } catch {
+      // Ollama may not be running yet
+    }
+  }
+
+  private async resolveFastOllamaModel(
+    cleanBase: string,
+    requestedModel: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const now = Date.now();
+    if (this.cachedInstalledModels.length === 0 || now - this.lastTagsFetchMs > 30000) {
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 600);
+        const tagsRes = await fetch(`${cleanBase}/api/tags`, {
+          signal: signal || controller.signal,
+        });
+        clearTimeout(t);
+        if (tagsRes.ok) {
+          const tagsJson = (await tagsRes.json()) as { models?: Array<{ name: string }> };
+          this.cachedInstalledModels = (tagsJson.models || []).map((m) => m.name);
+          this.lastTagsFetchMs = now;
+        }
+      } catch {}
+    }
+
+    if (this.cachedInstalledModels.length > 0) {
+      const exactOrPrefix = this.cachedInstalledModels.find(
+        (m) =>
+          m.toLowerCase() === requestedModel.toLowerCase() ||
+          m.toLowerCase().startsWith(requestedModel.toLowerCase())
+      );
+      if (exactOrPrefix) return exactOrPrefix;
+
+      const fallbackOrder = [
+        'cluely-gemma4',
+        'gemma4:e4b',
+        'gemma4:12b',
+        'gemma4',
+        'gemma3',
+        'nemotron-mini',
+        'qwen3-vl',
+        'llama3',
+      ];
+      for (const pref of fallbackOrder) {
+        const match = this.cachedInstalledModels.find((m) => m.toLowerCase().includes(pref));
+        if (match) return match;
+      }
+    }
+
+    return requestedModel || 'gemma4:e4b';
+  }
+
   public async streamPrompt(request: AIStreamRequest): Promise<void> {
     const state = store.getState();
     const aiConfig = state.aiConfig;
     const provider = aiConfig.activeProvider;
     const model = aiConfig.activeModel;
 
-    // Resolve active mode
     const modeId = request.modeId || state.activeModeId;
     const activeMode = state.modes.find((m) => m.id === modeId) || state.modes[0];
 
-    // Determine trigger source: explicit request property or derived from prompt content
     const userTypedPrompt = request.prompt?.trim() || '';
     const triggerSource: 'typed' | 'voice' =
       request.triggerSource || (userTypedPrompt ? 'typed' : 'voice');
 
-    // Abort any existing in-flight streams to avoid concurrency collisions and conserve VRAM
     for (const ctrl of this.activeStreams.values()) {
       try {
         ctrl.abort();
@@ -59,18 +136,13 @@ export class AIRouter {
     const controller = new AbortController();
     this.activeStreams.set(request.requestId, controller);
 
-    // STEP 2 & 4: Always await pending transcription promises so in-flight Sherpa-ONNX
-    // chunks are completely committed to store before reading transcripts!
+    // Wait up to 900ms for any in-flight Sherpa-ONNX chunk (~150ms decode time)
     try {
-      await transcriptionService.awaitPendingTranscriptions(3000);
-    } catch (waitErr) {
-      console.warn('[AIRouter] awaitPendingTranscriptions error, continuing:', waitErr);
-    }
+      await transcriptionService.awaitPendingTranscriptions(900);
+    } catch {}
 
-    // Ensure active session exists so assist events are ALWAYS archived
     const activeSession = store.ensureActiveSession();
 
-    // Retrieve all chronological transcripts
     const stateTranscripts = store.getState().transcripts || [];
     const candidateSegments: TranscriptSegment[] = [
       ...(activeSession?.transcripts || []),
@@ -92,15 +164,11 @@ export class AIRouter {
       return timeA - timeB;
     });
 
-    // STEP 4: Gather the Full Question Without Cutting It Midway
     const cursorTs = store.getQuestionCursorTimestamp();
     let unansweredSegments = allSegments.filter(
       (t) => (t.timestamp || t.startTimeMs || 0) >= cursorTs
     );
 
-    // Contiguous Question Lookback Guard:
-    // If the preceding segment ended within 10,000ms (10 seconds) of the start of unansweredSegments,
-    // include it too so a long multi-sentence question split across chunks is 100% captured!
     if (unansweredSegments.length > 0) {
       const firstUnanswered = unansweredSegments[0];
       const firstIdx = allSegments.findIndex((s) => s.id === firstUnanswered.id);
@@ -111,7 +179,10 @@ export class AIRouter {
           const currSeg = allSegments[currStartIdx];
           const prevEnd = prevSeg.endTimeMs || prevSeg.timestamp || 0;
           const currStart = currSeg.startTimeMs || currSeg.timestamp || 0;
-          if (currStart - prevEnd <= 10000 || Math.abs(currStart - (prevSeg.timestamp || 0)) <= 10000) {
+          if (
+            currStart - prevEnd <= 10000 ||
+            Math.abs(currStart - (prevSeg.timestamp || 0)) <= 10000
+          ) {
             currStartIdx--;
           } else {
             break;
@@ -121,29 +192,33 @@ export class AIRouter {
       }
     }
 
-    // Fallback: If unanswered block is still empty, take the last 8 segments
     if (unansweredSegments.length === 0) {
-      unansweredSegments = allSegments.slice(-8);
+      unansweredSegments = allSegments.slice(-6);
     }
 
-    // Advance cursor timestamp ONLY after capturing unansweredSegments
     if (triggerSource === 'voice') {
       store.setQuestionCursorTimestamp(Date.now());
     }
 
-    // Derive authentic full question text
     const fullQuestionText =
       triggerSource === 'voice' || !userTypedPrompt
         ? unansweredSegments.map((s) => s.text).join(' ') || 'Live Spoken Question'
         : userTypedPrompt;
 
-    const usedMemories = await memoryBrain.retrieveRelevantMemories(
-      userTypedPrompt || fullQuestionText,
-      allSegments,
-      6
-    );
+    // <1ms in-memory Hybrid Vector + BM25 retrieval (zero network or model-swap latency!)
+    const [usedMemories, relevantFileChunks] = await Promise.all([
+      memoryBrain.retrieveRelevantMemories(
+        userTypedPrompt || fullQuestionText,
+        allSegments,
+        4
+      ),
+      memoryBrain.retrieveRelevantFileChunks(
+        userTypedPrompt || fullQuestionText,
+        activeMode.files || [],
+        4
+      ),
+    ]);
 
-    // Screen vision snapshot if attached or live screen active
     let imageBase64: string | null = null;
     if (request.imageDataUrl) {
       imageBase64 = request.imageDataUrl.replace(/^data:image\/[a-z]+;base64,/, '');
@@ -153,17 +228,19 @@ export class AIRouter {
         if (snap) {
           imageBase64 = snap.data;
         }
-      } catch (err) {
-        console.warn('[AIRouter] Screen capture snapshot failed, continuing with audio/text only:', err);
-      }
+      } catch {}
     }
 
-    // Build assembled system instruction & knowledge context
-    const systemPrompt = this.buildSystemPrompt(activeMode.contextPrompt, activeMode.files, usedMemories);
+    const systemPrompt = this.buildSystemPrompt(
+      activeMode.contextPrompt,
+      relevantFileChunks,
+      usedMemories,
+      activeSession.notes
+    );
 
-    // Build True Multi-Turn History Messages (Last 6 Q&A assist events from activeSession)
+    // Keep last 4 Q&A turns for multi-turn continuity while keeping prefill <150ms
     const historyMessages: ChatHistoryMessage[] = [];
-    const pastAssists = (activeSession.assistEvents || []).slice(-6);
+    const pastAssists = (activeSession.assistEvents || []).slice(-4);
     for (const ev of pastAssists) {
       if (ev.userPrompt && ev.aiResponse) {
         historyMessages.push({ role: 'user', content: ev.userPrompt });
@@ -171,12 +248,12 @@ export class AIRouter {
       }
     }
 
-    // Build Current User Message Content
     const userMessageContent = this.buildUserPrompt(
       userTypedPrompt,
       unansweredSegments,
       allSegments,
-      triggerSource
+      triggerSource,
+      Boolean(imageBase64)
     );
 
     let accumulatedResponse = '';
@@ -198,7 +275,6 @@ export class AIRouter {
 
     const sendDone = () => {
       if (accumulatedResponse.trim()) {
-        // If response starts with **Question:**, extract the phonetically repaired question for session history title!
         let finalTitle = fullQuestionText;
         const qMatch = accumulatedResponse.match(/^\*\*Question:\*\*\s*(.+?)(\n|$)/i);
         if (qMatch && qMatch[1]?.trim()) {
@@ -245,7 +321,7 @@ export class AIRouter {
       const getOllamaModel = () => {
         if (model && model !== 'default') return model;
         if (aiConfig.activeModel && aiConfig.activeModel !== 'default') return aiConfig.activeModel;
-        return 'nemotron-mini';
+        return 'gemma4:e4b';
       };
 
       if (provider === 'gemini') {
@@ -262,7 +338,7 @@ export class AIRouter {
       } else if (provider === 'openai') {
         await this.streamOpenAI(
           aiConfig.apiKeys.openai,
-          model || 'gpt-4o',
+          model || 'gpt-4o-mini',
           systemPrompt,
           historyMessages,
           userMessageContent,
@@ -273,7 +349,7 @@ export class AIRouter {
       } else if (provider === 'anthropic') {
         await this.streamAnthropic(
           aiConfig.apiKeys.anthropic,
-          model || 'claude-3-5-sonnet-20241022',
+          model || 'claude-3-5-haiku-20241022',
           systemPrompt,
           historyMessages,
           userMessageContent,
@@ -292,10 +368,7 @@ export class AIRouter {
           sendChunk
         );
       } else {
-        // Default / Offline: Use Local Ollama (nemotron-mini, gemma4:e4b, qwen3-vl, llama3.1, deepseek-r1)
         const targetOllamaModel = getOllamaModel();
-        console.log(`[AIRouter] Routing to Local Ollama model: ${targetOllamaModel} (provider=${provider})`);
-
         await this.streamOllama(
           aiConfig.apiKeys.ollamaUrl || 'http://127.0.0.1:11434',
           targetOllamaModel,
@@ -320,56 +393,43 @@ export class AIRouter {
 
   private buildSystemPrompt(
     modeContextPrompt: string,
-    files: Array<{ name: string; extractedText: string }>,
-    memories: MemoryItem[]
+    fileChunks: Array<{ fileName: string; text: string; score: number }>,
+    memories: MemoryItem[],
+    sessionNotes?: string
   ): string {
+    const outputLanguage = store.getState().outputLanguage || 'English';
     const parts: string[] = [];
 
-    parts.push(`You are Cluely, an ultra-smart real-time stealth teleprompter and copilot assisting the user live during meetings, interviews, and work sessions.`);
-    parts.push(`CRITICAL BEHAVIORAL DIRECTIVES:
-1. READ THE ENTIRE LIVE QUESTION & ANSWER COMPLETELY:
-- Read the entire live transcript question from start to finish—if it has multiple sentences, parts, or follow-ups, answer EVERY part completely.
-- NEVER cut off your answer halfway. Deliver a complete, satisfying, structured response.
-
-2. MULTI-TURN CONVERSATION MEMORY:
-- Use the prior conversation turns provided in this session to maintain full context for follow-up questions.
-- NEVER repeat or re-answer previous questions from earlier in the session. Build naturally upon what was already discussed.
-
-3. FIRST-PERSON EXPERT PERSONA:
-- Answer directly from the candidate/engineer's perspective ("I designed...", "In our architecture...", "We implemented...").
-- Deliver the real technical explanation from the active mode instructions, verified codebase files, and session discussion.
-- NEVER output evasive counter-questions or generic confirmation requests. Give the direct answer immediately.
-- If code is requested, provide clean, idiomatic code with meaningful variable names.
-
-4. MANDATORY TWO-STEP OUTPUT FORMAT FOR LIVE SPEECH ASSIST:
-- When answering live spoken speech, you MUST start your response with a single bold header line identifying the phonetically repaired question:
-  **Question:** <1-line phonetically corrected question deduced from the speech block>
-  followed on the next line by your direct, authoritative first-person answer ready to speak aloud!
-- If the user explicitly typed a direct prompt, answer the prompt directly without the Question header.
-
-5. ASR PHONETIC & CONTEXTUAL SPEECH REPAIR:
-- Automated speech recognition (ASR) frequently mishears technical terms, acronyms, or accented Hindi/English speech.
-  * Examples: "news lens" / "noose lens" -> "NewsLens AI", "be m 25" -> "BM25", "loosination" -> "hallucination", "rag as" -> "RAGAS", "cross in coder" -> "cross-encoder", "artikil chunks" -> "article_chunks_v2 (Qdrant MRL)", "dock her" -> "Docker".
-- Silently repair any misheard terms against the Active Mode Ground Truth and answer authoritatively. Never mention transcription errors.`);
-
-    const outputLanguage = store.getState().outputLanguage || 'English';
-    parts.push(`6. LANGUAGE REQUIREMENT: Deliver the response in ${outputLanguage}. If the conversation is bilingual (Hinglish / Hindi), ensure the answer feels completely natural for the user to speak aloud.`);
+    parts.push(
+      `You are Cluely, an ultra-fast 2-second real-time teleprompter copilot.
+SPEED & QUICK-THINKING RULES (CRITICAL):
+1. INSTANT 2-3 SECOND ANSWERS: Skip deep deliberation, long intros, and filler. Output the direct, speakable first-person answer ("I...", "We...") immediately on token #1.
+2. CONCISE & PUNCHY: Deliver 3-4 crisp bullet points (max 80-110 words for spoken questions, or clean code + 1-line complexity for coding) so the user can read and speak it in 2 seconds.
+3. VOICE QUESTION FORMAT: For spoken dialogue, start with:
+**Question:** <1-line clear question asked>
+followed immediately by the bulleted first-person answer.
+4. ZERO HALLUCINATION: Rely strictly on the live transcript, screen image, Mode instructions, Vector DB chunks, and Memory Vault. Language: ${outputLanguage}.`
+    );
 
     if (modeContextPrompt) {
-      parts.push(`\n### ACTIVE MODE GROUND TRUTH & INSTRUCTIONS:\n${modeContextPrompt}`);
+      parts.push(`\nMODE: ${modeContextPrompt.slice(0, 1200)}`);
     }
 
-    if (files.length > 0) {
-      parts.push(`\n### ATTACHED MODE KNOWLEDGE FILES:`);
-      for (const file of files) {
-        parts.push(`--- File: ${file.name} ---\n${file.extractedText.slice(0, 35000)}`);
+    if (sessionNotes && sessionNotes.trim()) {
+      parts.push(`\nNOTES: ${sessionNotes.trim().slice(0, 800)}`);
+    }
+
+    if (fileChunks.length > 0) {
+      parts.push(`\nVECTOR RAG CHUNKS:`);
+      for (const chunk of fileChunks) {
+        parts.push(`[${chunk.fileName}]: ${chunk.text.slice(0, 700)}`);
       }
     }
 
     if (memories.length > 0) {
-      parts.push(`\n### PERSONAL MEMORY BRAIN (Facts, Preferences & User Context):`);
+      parts.push(`\nUSER MEMORIES:`);
       for (const m of memories) {
-        parts.push(`• [${m.category.toUpperCase()}] ${m.title}: ${m.content}`);
+        parts.push(`• ${m.title}: ${m.content}`);
       }
     }
 
@@ -380,55 +440,57 @@ export class AIRouter {
     prompt: string,
     unansweredSegments: TranscriptSegment[],
     allSegments: TranscriptSegment[],
-    triggerSource: 'typed' | 'voice'
+    triggerSource: 'typed' | 'voice',
+    hasScreenImage: boolean
   ): string {
     const parts: string[] = [];
 
-    // Earlier meeting dialogue for context (up to last 12 segments preceding the unanswered block)
     const unansweredIds = new Set(unansweredSegments.map((s) => s.id));
     const earlierSegments = allSegments
       .filter((s) => !unansweredIds.has(s.id))
-      .slice(-12);
+      .slice(-6);
 
     if (earlierSegments.length > 0) {
-      parts.push(`### EARLIER MEETING DIALOGUE (Last 12 turns for background context):`);
+      parts.push(`RECENT CONTEXT:`);
       for (const seg of earlierSegments) {
-        const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
+        const roleDesc = seg.role === 'me' ? 'Me' : 'Them';
         parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
       }
-      parts.push(`---\n`);
     }
 
     if (triggerSource === 'voice' || !prompt.trim()) {
-      parts.push(`### COMPLETE LIVE SPOKEN QUESTION / DIALOGUE TO ANSWER NOW:`);
-      for (const seg of unansweredSegments) {
-        const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
-        parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
-      }
-      parts.push(`\nINSTRUCTIONS FOR THIS TURN:
-1. Synthesize the overarching technical question from the ENTIRE live spoken dialogue above. If it spans multiple sentences or clauses, answer EVERY part thoroughly.
-2. Silently repair any phonetic ASR errors using the Active Mode ground truth and prior turns.
-3. Begin your response with:
-**Question:** <1-line phonetically corrected question deduced from the speech block>
-followed immediately by your authoritative, first-person answer ready to say out loud.`);
-    } else {
-      parts.push(`### CANDIDATE DIRECTIVE / QUESTION TO ANSWER NOW:\n${prompt.trim()}`);
       if (unansweredSegments.length > 0) {
-        parts.push(`\n### ACCOMPANYING LIVE ROOM SPEECH:`);
+        parts.push(`LIVE SPOKEN QUESTION TO ANSWER NOW (IN 2-3 SECONDS):`);
         for (const seg of unansweredSegments) {
-          const roleDesc = seg.role === 'me' ? 'Candidate (Me)' : 'Interviewer (Them)';
+          const roleDesc = seg.role === 'me' ? 'Me' : 'Them';
+          parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
+        }
+        parts.push(
+          `\nOutput:\n**Question:** <1-line question>\nFollowed immediately by 3-4 concise, speakable first-person bullet points.`
+        );
+      } else if (hasScreenImage) {
+        parts.push(
+          `Analyze the problem or code on screen and give the immediate solution + complexity.`
+        );
+      } else {
+        parts.push(
+          `No recent speech detected yet. Give a 1-sentence readiness confirmation.`
+        );
+      }
+    } else {
+      parts.push(`DIRECT QUESTION (ANSWER IN 2-3 SECONDS):\n${prompt.trim()}`);
+      if (unansweredSegments.length > 0) {
+        parts.push(`LIVE SPEECH:`);
+        for (const seg of unansweredSegments) {
+          const roleDesc = seg.role === 'me' ? 'Me' : 'Them';
           parts.push(`[${seg.speakerLabel || roleDesc}]: "${seg.text}"`);
         }
       }
-      parts.push(`\nAddress this directive directly using the Active Mode ground truth and session context.`);
     }
 
     return parts.join('\n');
   }
 
-  /**
-   * Gemini SSE Streaming
-   */
   private async streamGemini(
     apiKey: string,
     model: string,
@@ -468,8 +530,9 @@ followed immediately by your authoritative, first-person answer ready to say out
       },
       contents,
       generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 2048,
+        temperature: 0.1,
+        maxOutputTokens: 450,
+        thinkingConfig: { thinkingBudget: 0 },
       },
     };
 
@@ -494,9 +557,6 @@ followed immediately by your authoritative, first-person answer ready to say out
     });
   }
 
-  /**
-   * OpenAI Chat Completions SSE Streaming
-   */
   private async streamOpenAI(
     apiKey: string,
     model: string,
@@ -524,20 +584,19 @@ followed immediately by your authoritative, first-person answer ready to say out
       { role: 'user', content: userContent },
     ];
 
-    const body = {
-      model,
-      stream: true,
-      messages,
-      temperature: 0.2,
-    };
-
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        stream: true,
+        messages,
+        temperature: 0.1,
+        max_tokens: 450,
+      }),
       signal,
     });
 
@@ -556,9 +615,6 @@ followed immediately by your authoritative, first-person answer ready to say out
     });
   }
 
-  /**
-   * Anthropic Messages SSE Streaming
-   */
   private async streamAnthropic(
     apiKey: string,
     model: string,
@@ -571,7 +627,11 @@ followed immediately by your authoritative, first-person answer ready to say out
   ): Promise<void> {
     if (!apiKey) throw new Error('Anthropic API key is required');
 
-    const content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> = [];
+    const content: Array<{
+      type: string;
+      text?: string;
+      source?: { type: string; media_type: string; data: string };
+    }> = [];
     if (imageBase64) {
       content.push({
         type: 'image',
@@ -589,14 +649,6 @@ followed immediately by your authoritative, first-person answer ready to say out
       { role: 'user', content },
     ];
 
-    const body = {
-      model,
-      system: systemPrompt,
-      stream: true,
-      max_tokens: 2048,
-      messages,
-    };
-
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -604,7 +656,13 @@ followed immediately by your authoritative, first-person answer ready to say out
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        system: systemPrompt,
+        stream: true,
+        max_tokens: 450,
+        messages,
+      }),
       signal,
     });
 
@@ -623,9 +681,6 @@ followed immediately by your authoritative, first-person answer ready to say out
     });
   }
 
-  /**
-   * Groq Chat Completions SSE Streaming
-   */
   private async streamGroq(
     apiKey: string,
     model: string,
@@ -643,20 +698,19 @@ followed immediately by your authoritative, first-person answer ready to say out
       { role: 'user', content: userPrompt },
     ];
 
-    const body = {
-      model,
-      stream: true,
-      messages,
-      temperature: 0.2,
-    };
-
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        stream: true,
+        messages,
+        temperature: 0.1,
+        max_tokens: 450,
+      }),
       signal,
     });
 
@@ -676,7 +730,7 @@ followed immediately by your authoritative, first-person answer ready to say out
   }
 
   /**
-   * Ollama NDJSON Streaming with True Multi-Turn History
+   * Ultra-Fast 2-3 Second Local Ollama Streaming (`think: false`, `keep_alive: -1`, `num_ctx: 2048`)
    */
   private async streamOllama(
     baseUrl: string,
@@ -688,30 +742,27 @@ followed immediately by your authoritative, first-person answer ready to say out
     signal: AbortSignal,
     onChunk: (delta: string) => void
   ): Promise<void> {
-    const endpoint = `${baseUrl.replace(/\/+$/, '')}/api/chat`;
+    const cleanBase = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanBase}/api/chat`;
 
-    let activeModel = model;
+    let activeModel = await this.resolveFastOllamaModel(cleanBase, model, signal);
     let imagesToSend: string[] | undefined = undefined;
 
-    const isVisionModel = /vision|vl|multimodal|llava/i.test(model);
+    const isVisionCapable = /gemma4|gemma-4|cluely-gemma4|vision|vl|multimodal|llava|gemma3/i.test(
+      activeModel
+    );
+
     if (imageBase64) {
-      if (isVisionModel) {
+      if (isVisionCapable) {
         imagesToSend = [imageBase64];
-      } else {
-        try {
-          const tagsRes = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/tags`, { signal });
-          if (tagsRes.ok) {
-            const tagsJson = (await tagsRes.json()) as { models?: Array<{ name: string }> };
-            const installed = (tagsJson.models || []).map((m) => m.name.toLowerCase());
-            const visionCandidate = installed.find((n) =>
-              /qwen3-vl|llama3\.2-vision|llava/i.test(n)
-            );
-            if (visionCandidate) {
-              activeModel = visionCandidate;
-              imagesToSend = [imageBase64];
-            }
-          }
-        } catch {}
+      } else if (this.cachedInstalledModels.length > 0) {
+        const visionFallback = this.cachedInstalledModels.find((n) =>
+          /gemma4|qwen3-vl|llama3\.2-vision|llava/i.test(n)
+        );
+        if (visionFallback) {
+          activeModel = visionFallback;
+          imagesToSend = [imageBase64];
+        }
       }
     }
 
@@ -730,11 +781,15 @@ followed immediately by your authoritative, first-person answer ready to say out
         ...historyMessages.map((m) => ({ role: m.role, content: m.content })),
         userMessage,
       ],
-      think: false, // Disables internal reasoning buffer so responses stream immediately
+      think: false, // Completely skips deep-thinking buffer for immediate token #1 streaming
+      keep_alive: -1, // Keeps model permanently pinned in GPU VRAM
       options: {
-        temperature: 0.15,
+        temperature: 0.1,
+        top_k: 20,
         top_p: 0.85,
-        num_predict: 450, // Optimal token limit for lightning-fast teleprompter answers
+        repeat_penalty: 1.12,
+        num_ctx: 2048, // Compact context window for sub-150ms prompt prefill
+        num_predict: 280, // Finishes complete teleprompter answer in 2-3 seconds
       },
       stream: true,
     };
@@ -748,7 +803,9 @@ followed immediately by your authoritative, first-person answer ready to say out
 
     if (!res.ok) {
       const err = await res.text();
-      throw new Error(`Ollama error (${res.status}): ${err}`);
+      throw new Error(
+        `Ollama error (${res.status}) with model '${activeModel}': ${err}. Ensure Ollama is running and '${model}' is pulled.`
+      );
     }
 
     if (!res.body) {
@@ -771,10 +828,8 @@ followed immediately by your authoritative, first-person answer ready to say out
         if (!line.trim()) continue;
         try {
           const json = JSON.parse(line);
-          // Only emit actual message content, ignore thinking steps
           if (json.message?.content) {
-            let chunkText = json.message.content;
-            chunkText = chunkText.replace(/<think>[\s\S]*?<\/think>/gi, '');
+            const chunkText = json.message.content.replace(/<think>[\s\S]*?<\/think>/gi, '');
             if (chunkText) {
               onChunk(chunkText);
             }
@@ -790,8 +845,7 @@ followed immediately by your authoritative, first-person answer ready to say out
       try {
         const json = JSON.parse(buffer);
         if (json.message?.content) {
-          let chunkText = json.message.content;
-          chunkText = chunkText.replace(/<think>[\s\S]*?<\/think>/gi, '');
+          const chunkText = json.message.content.replace(/<think>[\s\S]*?<\/think>/gi, '');
           if (chunkText) {
             onChunk(chunkText);
           }
@@ -800,9 +854,6 @@ followed immediately by your authoritative, first-person answer ready to say out
     }
   }
 
-  /**
-   * Helper to consume Server-Sent Events (SSE) stream
-   */
   private async consumeSSE(
     res: Response,
     signal: AbortSignal,

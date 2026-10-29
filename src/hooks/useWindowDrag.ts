@@ -6,7 +6,6 @@ export function useWindowDrag(target: 'overlay' | 'settings') {
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      // Only drag on primary left click
       if (e.button !== 0) return;
 
       const targetEl = e.target as HTMLElement | null;

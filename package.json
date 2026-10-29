@@ -1,12 +1,16 @@
 {
   "name": "cluely-studio",
   "version": "1.0.0",
-  "description": "Production-grade desktop AI copilot with stealth screen-sharing protection and dual-channel audio capture",
+  "description": "Production-grade desktop AI copilot with stealth screen-sharing protection, Local Gemma 4 multimodal AI, Hybrid Vector DB, and dual-channel ONNX audio capture",
   "main": "dist-electron/main.cjs",
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Electron versions"
+  ],
   "scripts": {
     "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --outfile=dist-electron/main.cjs --external:electron --external:sherpa-onnx-node && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
-    "dev:renderer": "vite --port 5173 --strictPort",
-    "dev": "npm run build:electron && concurrently -k \"npm run dev:renderer\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:renderer": "vite --port 5188 --strictPort",
+    "dev": "npm run build:electron && concurrently -k \"npm run dev:renderer\" \"wait-on http://localhost:5188 && electron .\"",
     "build": "npm run build:electron && vite build",
     "typecheck": "tsc --noEmit"
   },

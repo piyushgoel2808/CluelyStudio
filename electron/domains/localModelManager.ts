@@ -6,21 +6,23 @@ import * as os from 'os';
 import { app } from 'electron';
 import { spawn } from 'child_process';
 import { windowManager } from './windowManager';
-import { LocalModelStatus } from '../../src/types/ipc';
+import { store } from './store';
+import { FineTuneExportResult, LocalModelId, LocalModelStatus } from '../../src/types/ipc';
 
 export class LocalModelManager {
   private localServer: http.Server | null = null;
   private serverPort: number = 50051;
   private isServerRunning: boolean = false;
   private ollamaUrl: string = 'http://127.0.0.1:11434';
-  private modelStatuses: Map<string, LocalModelStatus> = new Map();
+  private modelStatuses: Map<LocalModelId, LocalModelStatus> = new Map();
 
-  // Cached Sherpa-ONNX offline recognizer & diarization extractor
+  // Serialized mutex queue for native Sherpa-ONNX C++ decoding to prevent concurrent stream races
+  private decodeMutexPromise: Promise<unknown> = Promise.resolve();
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private recognizer: any = null;
   private recognizerLoading: boolean = false;
 
-  // Cached Sherpa-ONNX Whisper Multilingual recognizers by language code ('en', 'hi', etc.)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private whisperRecognizers: Map<string, any> = new Map();
   private whisperRecognizerLoading: boolean = false;
@@ -29,67 +31,120 @@ export class LocalModelManager {
     this.initDefaultStatuses();
   }
 
+  private runExclusiveDecode<T>(fn: () => T | Promise<T>): Promise<T> {
+    const next = this.decodeMutexPromise.then(fn, fn);
+    this.decodeMutexPromise = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+
   private initDefaultStatuses(): void {
     const defaults: LocalModelStatus[] = [
       {
-        id: 'nvidia-nemotron-ollama',
-        name: 'NVIDIA Nemotron-Mini 4B (Ollama)',
+        id: 'gemma4-e4b-ollama',
+        name: 'Google Gemma 4 E4B (Multimodal Edge — Fast Text + Screen Vision)',
         provider: 'ollama',
-        modelTag: 'nemotron-mini:latest',
+        modelTag: 'gemma4:e4b',
+        role: 'llm-multimodal',
         installed: false,
         running: false,
         downloading: false,
         progressPercent: 0,
-        sizeLabel: '2.7 GB',
-        statusMessage: 'Ready to pull via local Ollama',
+        sizeLabel: '3.2 GB',
+        statusMessage: 'Recommended primary local LLM for sub-250ms teleprompter & vision',
       },
       {
-        id: 'ollama-vision',
-        name: 'Llama 3.2 Vision (Ollama Screen Copilot)',
+        id: 'gemma4-12b-ollama',
+        name: 'Google Gemma 4 12B (Multimodal Pro — Deep Coding, Architecture & Vision)',
         provider: 'ollama',
-        modelTag: 'llama3.2-vision:latest',
+        modelTag: 'gemma4:12b',
+        role: 'llm-multimodal',
         installed: false,
         running: false,
         downloading: false,
         progressPercent: 0,
-        sizeLabel: '7.9 GB',
-        statusMessage: 'Multimodal screen understanding model',
+        sizeLabel: '7.8 GB',
+        statusMessage: 'High-reasoning 12B multimodal model for complex interviews & code',
+      },
+      {
+        id: 'gemma2-embed-ollama',
+        name: 'Gemma 2 / Dense Embedding Engine (Local Vector DB RAG)',
+        provider: 'ollama',
+        modelTag: 'gemma2:2b',
+        role: 'embedding',
+        installed: false,
+        running: false,
+        downloading: false,
+        progressPercent: 0,
+        sizeLabel: '1.6 GB',
+        statusMessage: 'Powers semantic Vector DB over Personal Memories & Mode Files',
       },
       {
         id: 'nvidia-parakeet-tdt-onnx',
-        name: 'NVIDIA Parakeet-TDT 0.6B v2 (INT8 ONNX)',
+        name: 'NVIDIA Parakeet-TDT 0.6B v2 (INT8 ONNX — ~150ms English ASR)',
         provider: 'onnx-local',
         modelTag: 'parakeet-tdt-0.6b-v2-int8',
+        role: 'asr',
         installed: false,
         running: false,
         downloading: false,
         progressPercent: 0,
         sizeLabel: '640 MB',
-        statusMessage: 'High-accuracy speech-to-text ONNX',
+        statusMessage: 'Ultra-fast non-autoregressive offline speech-to-text',
       },
       {
         id: 'whisper-base-onnx',
-        name: 'Whisper Small Multilingual (INT8 ONNX — Hindi & English)',
+        name: 'Whisper Small Multilingual (INT8 ONNX — Hindi, Hinglish & English)',
         provider: 'onnx-local',
         modelTag: 'whisper-small-int8',
+        role: 'asr',
         installed: false,
         running: false,
         downloading: false,
         progressPercent: 0,
         sizeLabel: '360 MB',
-        statusMessage: '100% offline multilingual speech-to-text (Hindi, English, Auto-detect)',
+        statusMessage: '100% offline multilingual speech recognition',
       },
       {
         id: 'speaker-diarization-onnx',
-        name: '3D-Speaker CAM++ Diarization ONNX',
+        name: '3D-Speaker CAM++ Diarization ONNX (Me vs. Them Separation)',
         provider: 'onnx-local',
         modelTag: 'campplus-voxceleb',
+        role: 'diarization',
         installed: false,
         running: false,
         downloading: false,
         progressPercent: 0,
         sizeLabel: '28 MB',
-        statusMessage: 'Neural speaker embedding extractor',
+        statusMessage: 'Neural speaker embedding extractor for multi-talker attribution',
+      },
+      {
+        id: 'nvidia-nemotron-ollama',
+        name: 'NVIDIA Nemotron-Mini 4B (Ollama Ultra-Light)',
+        provider: 'ollama',
+        modelTag: 'nemotron-mini:latest',
+        role: 'llm-multimodal',
+        installed: false,
+        running: false,
+        downloading: false,
+        progressPercent: 0,
+        sizeLabel: '2.7 GB',
+        statusMessage: 'Lightweight 4B text assistant',
+      },
+      {
+        id: 'ollama-vision',
+        name: 'Llama 3.2 Vision / Qwen3-VL (Dedicated Screen Analyzer)',
+        provider: 'ollama',
+        modelTag: 'llama3.2-vision:latest',
+        role: 'llm-multimodal',
+        installed: false,
+        running: false,
+        downloading: false,
+        progressPercent: 0,
+        sizeLabel: '7.9 GB',
+        statusMessage: 'Optional dedicated vision model',
       },
     ];
 
@@ -176,18 +231,12 @@ export class LocalModelManager {
     return defaultBase;
   }
 
-  /**
-   * Check if Ollama is running, query installed models, and verify local ONNX files
-   */
   public async listLocalModels(): Promise<LocalModelStatus[]> {
     await this.checkOllamaStatus();
     this.checkOnnxFilesStatus();
     return Array.from(this.modelStatuses.values());
   }
 
-  /**
-   * Check Ollama daemon and installed models
-   */
   public async checkOllamaStatus(): Promise<boolean> {
     try {
       const controller = new AbortController();
@@ -200,63 +249,70 @@ export class LocalModelManager {
       clearTimeout(timeoutId);
 
       if (res.ok) {
-        const json = (await res.json()) as { models?: Array<{ name: string; model?: string }> };
-        const installedTags = new Set((json.models || []).map((m) => m.name.toLowerCase()));
+        const json = (await res.json()) as { models?: Array<{ name: string }> };
+        const installedTags = (json.models || []).map((m) => m.name.toLowerCase());
 
-        // Update nemotron-mini status
-        const nemotronStatus = this.modelStatuses.get('nvidia-nemotron-ollama');
-        if (nemotronStatus) {
-          const isInstalled =
-            installedTags.has('nemotron-mini:latest') ||
-            installedTags.has('nemotron-mini') ||
-            Array.from(installedTags).some((t) => t.includes('nemotron-mini'));
-          nemotronStatus.installed = isInstalled;
-          nemotronStatus.running = true;
-          nemotronStatus.statusMessage = isInstalled
-            ? 'Installed & ready for offline inference'
-            : 'Ollama is online; model ready to download';
-        }
+        const matchTag = (patterns: string[]) =>
+          installedTags.some((t) => patterns.some((p) => t === p || t.startsWith(p) || t.includes(p)));
 
-        // Update vision model status (qwen3-vl or llama3.2-vision)
-        const visionStatus = this.modelStatuses.get('ollama-vision');
-        if (visionStatus) {
-          const isInstalled =
-            installedTags.has('qwen3-vl:latest') ||
-            installedTags.has('qwen3-vl') ||
-            installedTags.has('llama3.2-vision:latest') ||
-            installedTags.has('llama3.2-vision') ||
-            Array.from(installedTags).some((t) => t.includes('qwen3-vl') || t.includes('vision'));
-          visionStatus.installed = isInstalled;
-          visionStatus.running = true;
-          visionStatus.statusMessage = isInstalled
-            ? 'Installed (qwen3-vl) & active for multimodal screen analysis'
-            : 'Ollama is online; model ready to download';
-        }
+        const updateOllamaEntry = (
+          id: LocalModelId,
+          patterns: string[],
+          readyMsg: string
+        ) => {
+          const st = this.modelStatuses.get(id);
+          if (st) {
+            const isInst = matchTag(patterns);
+            st.installed = isInst;
+            st.running = true;
+            st.statusMessage = isInst
+              ? readyMsg
+              : 'Ollama online — click Download to pull model';
+          }
+        };
+
+        updateOllamaEntry(
+          'gemma4-e4b-ollama',
+          ['gemma4:e4b', 'cluely-gemma4:e4b', 'gemma4:latest'],
+          'Installed & active for fast multimodal teleprompter inference'
+        );
+        updateOllamaEntry(
+          'gemma4-12b-ollama',
+          ['gemma4:12b', 'cluely-gemma4:12b'],
+          'Installed & active for deep 12B multimodal reasoning'
+        );
+        updateOllamaEntry(
+          'gemma2-embed-ollama',
+          ['gemma2:2b', 'gemma2', 'embeddinggemma', 'nomic-embed-text'],
+          'Installed & active for local Vector DB embeddings'
+        );
+        updateOllamaEntry(
+          'nvidia-nemotron-ollama',
+          ['nemotron-mini'],
+          'Installed & ready for offline inference'
+        );
+        updateOllamaEntry(
+          'ollama-vision',
+          ['llama3.2-vision', 'qwen3-vl'],
+          'Installed & active for multimodal screen analysis'
+        );
 
         return true;
       }
     } catch {
-      // Ollama not responding; attempt auto-spawn if binary exists
       this.trySpawnOllama();
     }
 
-    const nemotronStatus = this.modelStatuses.get('nvidia-nemotron-ollama');
-    if (nemotronStatus) {
-      nemotronStatus.running = false;
-      nemotronStatus.statusMessage = 'Ollama daemon is not running';
-    }
-    const visionStatus = this.modelStatuses.get('ollama-vision');
-    if (visionStatus) {
-      visionStatus.running = false;
-      visionStatus.statusMessage = 'Ollama daemon is not running';
+    for (const st of this.modelStatuses.values()) {
+      if (st.provider === 'ollama') {
+        st.running = false;
+        st.statusMessage = 'Ollama daemon is offline (install or start Ollama)';
+      }
     }
 
     return false;
   }
 
-  /**
-   * Attempt to spawn Ollama in background if installed on system
-   */
   private trySpawnOllama(): void {
     const candidates = ['/usr/local/bin/ollama', '/opt/homebrew/bin/ollama', '/usr/bin/ollama'];
     for (const bin of candidates) {
@@ -268,22 +324,16 @@ export class LocalModelManager {
           });
           child.unref();
           break;
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
     }
   }
 
-  /**
-   * Inspect filesystem for ONNX weights in extra-resources
-   */
   private checkOnnxFilesStatus(): void {
     const baseDir = this.getModelsDir();
     const parakeetDir = path.join(baseDir, 'parakeet-tdt');
     const diarizationDir = path.join(baseDir, 'diarization');
 
-    // Check Parakeet-TDT ONNX
     const parakeetStatus = this.modelStatuses.get('nvidia-parakeet-tdt-onnx');
     if (parakeetStatus) {
       const hasEncoder = fs.existsSync(path.join(parakeetDir, 'encoder.int8.onnx'));
@@ -292,11 +342,10 @@ export class LocalModelManager {
       parakeetStatus.installed = isInstalled;
       parakeetStatus.running = this.isServerRunning && isInstalled;
       if (isInstalled) {
-        parakeetStatus.statusMessage = 'ONNX weights ready on local HTTP runner (127.0.0.1:50051)';
+        parakeetStatus.statusMessage = 'ONNX weights active in-process & on 127.0.0.1:50051';
       }
     }
 
-    // Check Speaker Diarization ONNX
     const diarStatus = this.modelStatuses.get('speaker-diarization-onnx');
     if (diarStatus) {
       const hasModel = fs.existsSync(
@@ -305,11 +354,10 @@ export class LocalModelManager {
       diarStatus.installed = hasModel;
       diarStatus.running = this.isServerRunning && hasModel;
       if (hasModel) {
-        diarStatus.statusMessage = 'CAM++ Diarization ONNX model loaded';
+        diarStatus.statusMessage = 'CAM++ Diarization ONNX model active';
       }
     }
 
-    // Check Whisper Small / Base Multilingual ONNX (Hindi + English)
     const whisperDir = this.getWhisperModelsDir();
     const whisperStatus = this.modelStatuses.get('whisper-base-onnx');
     if (whisperStatus) {
@@ -326,15 +374,267 @@ export class LocalModelManager {
       whisperStatus.running = isInstalled;
       if (isInstalled) {
         whisperStatus.statusMessage = hasSmall
-          ? 'Whisper Small Multilingual ready (100% offline Hindi & English)'
-          : 'Whisper Base Multilingual ready (100% offline Hindi & English)';
+          ? 'Whisper Small Multilingual active (Hindi & English)'
+          : 'Whisper Base Multilingual active (Hindi & English)';
       }
     }
   }
 
   /**
-   * Lazily loads and caches the Sherpa-ONNX Whisper Multilingual recognizer per language
+   * Compiles a domain-adapted Cluely Teleprompter model (`cluely-gemma4:e4b` or `cluely-gemma4:12b`)
+   * in local Ollama with tuned system instructions, anti-hallucination constraints, and sampling parameters.
    */
+  public async buildCustomGemmaModel(
+    baseModel: 'gemma4:e4b' | 'gemma4:12b' = 'gemma4:e4b'
+  ): Promise<{ ok: boolean; modelName: string; message: string }> {
+    const targetName = baseModel === 'gemma4:12b' ? 'cluely-gemma4:12b' : 'cluely-gemma4:e4b';
+    const systemPrompt = `You are Cluely, an ultra-fast 2-second real-time desktop meeting and interview teleprompter.
+- Skip deep thinking and filler. Start outputting the direct first-person answer ("I...", "We...") on token #1.
+- Deliver 3-4 short, high-impact bullet points (under 90 words) so the user can read and speak the answer in 2-3 seconds.
+- Never fabricate project names, company names, or file paths not present in context.`;
+
+    try {
+      const res = await fetch(`${this.ollamaUrl}/api/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: targetName,
+          from: baseModel,
+          system: systemPrompt,
+          parameters: {
+            temperature: 0.1,
+            top_p: 0.85,
+            top_k: 20,
+            repeat_penalty: 1.12,
+            num_ctx: 2048,
+            num_predict: 280,
+          },
+          stream: false,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        return {
+          ok: false,
+          modelName: targetName,
+          message: `Failed to build ${targetName}: ${errText}. Make sure ${baseModel} is pulled in Ollama first.`,
+        };
+      }
+
+      // Automatically set the newly built custom model as active
+      const currentConfig = store.getState().aiConfig;
+      store.patchState({
+        aiConfig: {
+          ...currentConfig,
+          activeProvider: 'ollama',
+          activeModel: targetName,
+        },
+      });
+
+      return {
+        ok: true,
+        modelName: targetName,
+        message: `Compiled and activated domain-tuned '${targetName}' in local Ollama!`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        modelName: targetName,
+        message: `Ollama connection failed while building ${targetName}: ${String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Exports all verified Session Q&A turns, Personal Memories, and Mode Instructions
+   * into a ShareGPT/Gemma-4 ChatML JSONL fine-tuning dataset + Modelfile + Unsloth/MLX LoRA training script.
+   */
+  public async exportFineTuneDataset(
+    baseModel: 'gemma4:e4b' | 'gemma4:12b' = 'gemma4:e4b'
+  ): Promise<FineTuneExportResult> {
+    const outDir = path.join(app.getPath('userData'), 'fine-tuning');
+    if (!fs.existsSync(outDir)) {
+      fs.mkdirSync(outDir, { recursive: true });
+    }
+
+    const datasetPath = path.join(outDir, 'cluely_gemma4_finetune.jsonl');
+    const modelfilePath = path.join(outDir, 'Modelfile.cluely-gemma4');
+    const scriptPath = path.join(outDir, 'train_gemma4_qlora.py');
+
+    const state = store.getState();
+    const samples: Array<{
+      messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+    }> = [];
+
+    const sysInstruction =
+      'You are Cluely, a real-time stealth meeting and interview copilot. Deliver direct, grounded, first-person answers ready to speak aloud.';
+
+    // 1. Collect real session Q&A assist events
+    for (const sess of state.pastSessions || []) {
+      for (const ev of sess.assistEvents || []) {
+        if (ev.userPrompt && ev.aiResponse && ev.aiResponse.length > 20) {
+          samples.push({
+            messages: [
+              { role: 'system', content: sysInstruction },
+              { role: 'user', content: ev.userPrompt },
+              { role: 'assistant', content: ev.aiResponse },
+            ],
+          });
+        }
+      }
+    }
+
+    // 2. Collect personal memory Q&A pairs for personalized grounding
+    for (const mem of state.personalMemories || []) {
+      samples.push({
+        messages: [
+          { role: 'system', content: sysInstruction },
+          {
+            role: 'user',
+            content: `What is my background or preference regarding ${mem.title}?`,
+          },
+          {
+            role: 'assistant',
+            content: `Regarding ${mem.title}: ${mem.content}`,
+          },
+        ],
+      });
+    }
+
+    // 3. Seed high-quality canonical teleprompter examples if dataset has < 5 examples
+    if (samples.length < 5) {
+      samples.push(
+        {
+          messages: [
+            { role: 'system', content: sysInstruction },
+            {
+              role: 'user',
+              content:
+                'How do you combine vector search and keyword search in a production RAG pipeline?',
+            },
+            {
+              role: 'assistant',
+              content:
+                '**Question:** How do we combine dense vector search and lexical search in our RAG pipeline?\n\n- **Stage 1 Hybrid Retrieval (RRF):** We run dense cosine similarity search (using Gemma 2 / dense embeddings) in parallel with BM25 lexical matching, merging the top candidates via Reciprocal Rank Fusion (`score = 1 / (60 + rank)`).\n- **Stage 2 Cross-Encoder Reranking:** We pass the top 25 fused chunks through a lightweight cross-encoder to score exact query-document relevance before feeding the top 6 chunks to the LLM, cutting prefill latency by 70% while preventing hallucinations.',
+            },
+          ],
+        },
+        {
+          messages: [
+            { role: 'system', content: sysInstruction },
+            {
+              role: 'user',
+              content:
+                'Why did you choose Gemma 4 E4B and 12B for local desktop inference over cloud APIs?',
+            },
+            {
+              role: 'assistant',
+              content:
+                '**Question:** Why did we select Gemma 4 (E4B / 12B) for local desktop copilot inference?\n\n- **Unified Multimodal Architecture:** Gemma 4 natively processes both live meeting transcripts and high-resolution screen snapshots in a single model without a cold-start model swap.\n- **Zero-Trust Privacy & Sub-250ms TTFT:** Running quantized weights in Apple Silicon unified memory keeps all corporate audio and screen data 100% on-device with zero network round-trip latency.',
+            },
+          ],
+        }
+      );
+    }
+
+    const jsonlContent = samples.map((s) => JSON.stringify(s)).join('\n') + '\n';
+    fs.writeFileSync(datasetPath, jsonlContent, 'utf-8');
+
+    const modelfileContent = `# Cluely Studio Custom Gemma 4 Modelfile
+FROM ${baseModel}
+
+PARAMETER temperature 0.15
+PARAMETER top_p 0.90
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.12
+PARAMETER num_ctx 8192
+
+SYSTEM """
+${sysInstruction}
+"""
+`;
+    fs.writeFileSync(modelfilePath, modelfileContent, 'utf-8');
+
+    const loraScriptContent = `#!/usr/bin/env python3
+"""
+Cluely Studio — Gemma 4 (${baseModel}) QLoRA Fine-Tuning Script (Unsloth / HuggingFace TRL)
+Dataset: ${datasetPath} (${samples.length} conversation turns)
+
+Usage:
+  pip install unsloth trl transformers datasets peft accelerate bitsandbytes
+  python3 "${scriptPath}"
+"""
+
+import os
+from datasets import load_dataset
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from unsloth import FastLanguageModel
+
+MODEL_ID = "google/gemma-4-e4b-it" if "${baseModel}" == "gemma4:e4b" else "google/gemma-4-12b-it"
+DATASET_PATH = r"${datasetPath}"
+OUTPUT_DIR = r"${path.join(outDir, 'cluely-gemma4-lora-adapter')}"
+
+def main():
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=MODEL_ID,
+        max_seq_length=4096,
+        load_in_4bit=True,
+    )
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=16,
+        lora_dropout=0,
+        bias="none",
+    )
+
+    dataset = load_dataset("json", data_files=DATASET_PATH, split="train")
+
+    def format_chat(example):
+        return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+
+    dataset = dataset.map(format_chat)
+
+    trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=dataset,
+        dataset_text_field="text",
+        max_seq_length=4096,
+        args=TrainingArguments(
+            per_device_train_batch_size=2,
+            gradient_accumulation_steps=4,
+            warmup_steps=5,
+            max_steps=60,
+            learning_rate=2e-4,
+            fp16=True,
+            logging_steps=1,
+            output_dir=OUTPUT_DIR,
+        ),
+    )
+    trainer.train()
+    model.save_pretrained_gguf(OUTPUT_DIR, tokenizer, quantization_method="q4_k_m")
+    print(f"Saved GGUF adapter to {OUTPUT_DIR}. Import into Ollama via: ollama create cluely-gemma4 -f {modelfilePath}")
+
+if __name__ == "__main__":
+    main()
+`;
+    fs.writeFileSync(scriptPath, loraScriptContent, 'utf-8');
+
+    return {
+      ok: true,
+      datasetPath,
+      modelfilePath,
+      scriptPath,
+      sampleCount: samples.length,
+      message: `Exported ${samples.length} training examples, Modelfile, and QLoRA training script to ${outDir}`,
+    };
+  }
+
   public ensureWhisperRecognizer(language: string = 'en'): boolean {
     let langCode = '';
     const l = (language || '').toLowerCase().trim();
@@ -354,15 +654,12 @@ export class LocalModelManager {
       langCode = 'ja';
     } else if (l.includes('chinese') || l === 'zh' || l.includes('mandarin')) {
       langCode = 'zh';
-    } else {
-      langCode = '';
     }
 
     const cacheKey = langCode || 'auto';
     if (this.whisperRecognizers.has(cacheKey)) {
       return true;
     }
-    // Whisper Multilingual natively supports all languages without duplicating ONNX weights
     if (this.whisperRecognizers.size > 0) {
       const existing = this.whisperRecognizers.values().next().value;
       if (existing) {
@@ -377,13 +674,11 @@ export class LocalModelManager {
       let encoder = path.join(baseDir, 'small-encoder.int8.onnx');
       let decoder = path.join(baseDir, 'small-decoder.int8.onnx');
       let tokens = path.join(baseDir, 'small-tokens.txt');
-      let isSmall = true;
 
       if (!fs.existsSync(encoder) || !fs.existsSync(decoder)) {
         encoder = path.join(baseDir, 'base-encoder.int8.onnx');
         decoder = path.join(baseDir, 'base-decoder.int8.onnx');
         tokens = path.join(baseDir, 'base-tokens.txt');
-        isSmall = false;
       }
 
       if (!fs.existsSync(encoder) || !fs.existsSync(decoder) || !fs.existsSync(tokens)) {
@@ -391,7 +686,6 @@ export class LocalModelManager {
       }
 
       this.whisperRecognizerLoading = true;
-      console.log(`[LocalModelManager] Loading Whisper ${isSmall ? 'Small' : 'Base'} Multilingual [${cacheKey}] model weights into memory...`);
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const sherpa = require('sherpa-onnx-node');
       const numThreads = Math.min(4, Math.max(1, os.cpus()?.length || 4));
@@ -416,7 +710,6 @@ export class LocalModelManager {
 
       this.whisperRecognizers.set(cacheKey, recognizer);
       this.whisperRecognizerLoading = false;
-      console.log(`[LocalModelManager] Sherpa-ONNX Whisper ${isSmall ? 'Small' : 'Base'} [${cacheKey}] recognizer ready for local offline inference`);
       return true;
     } catch (err) {
       this.whisperRecognizerLoading = false;
@@ -425,9 +718,6 @@ export class LocalModelManager {
     }
   }
 
-  /**
-   * Lazily loads and caches the Sherpa-ONNX Parakeet-TDT recognizer
-   */
   public ensureRecognizer(): boolean {
     if (this.recognizer) return true;
     if (this.recognizerLoading) return false;
@@ -445,7 +735,6 @@ export class LocalModelManager {
       }
 
       this.recognizerLoading = true;
-      console.log('[LocalModelManager] Loading Sherpa-ONNX Parakeet-TDT model weights into memory...');
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const sherpa = require('sherpa-onnx-node');
       const numThreads = Math.min(4, Math.max(1, os.cpus()?.length || 4));
@@ -465,7 +754,6 @@ export class LocalModelManager {
       });
 
       this.recognizerLoading = false;
-      console.log('[LocalModelManager] Sherpa-ONNX Parakeet-TDT recognizer ready for local offline inference');
       return true;
     } catch (err) {
       this.recognizerLoading = false;
@@ -474,11 +762,8 @@ export class LocalModelManager {
     }
   }
 
-  /**
-   * Pull model: routes to Ollama API or HTTPS file download
-   */
   public async pullLocalModel(
-    modelId: LocalModelStatus['id']
+    modelId: LocalModelId
   ): Promise<{ ok: boolean; message: string }> {
     const status = this.modelStatuses.get(modelId);
     if (!status) {
@@ -496,13 +781,10 @@ export class LocalModelManager {
     }
   }
 
-  /**
-   * Pull model via Ollama native streaming API
-   */
   private async pullOllamaModel(status: LocalModelStatus): Promise<{ ok: boolean; message: string }> {
     status.downloading = true;
     status.progressPercent = 0;
-    status.statusMessage = 'Connecting to Ollama...';
+    status.statusMessage = `Connecting to Ollama to pull ${status.modelTag}...`;
     this.broadcastProgress(status);
 
     try {
@@ -540,7 +822,12 @@ export class LocalModelManager {
               status?: string;
               total?: number;
               completed?: number;
+              error?: string;
             };
+
+            if (data.error) {
+              throw new Error(data.error);
+            }
 
             if (data.total && data.completed) {
               const pct = Math.min(100, Math.round((data.completed / data.total) * 100));
@@ -552,29 +839,30 @@ export class LocalModelManager {
               status.statusMessage = data.status;
             }
             this.broadcastProgress(status);
-          } catch {}
+          } catch (innerErr) {
+            if (innerErr instanceof Error && innerErr.message !== 'Unexpected end of JSON input') {
+              throw innerErr;
+            }
+          }
         }
       }
 
       status.downloading = false;
       status.installed = true;
       status.progressPercent = 100;
-      status.statusMessage = 'Successfully installed in local Ollama!';
+      status.statusMessage = `Installed ${status.modelTag} in local Ollama!`;
       this.broadcastProgress(status);
 
       return { ok: true, message: `Successfully installed ${status.name}` };
     } catch (err: unknown) {
       status.downloading = false;
       status.error = String(err);
-      status.statusMessage = `Download failed: ${String(err)}`;
+      status.statusMessage = `Pull failed: ${String(err)}`;
       this.broadcastProgress(status);
       return { ok: false, message: String(err) };
     }
   }
 
-  /**
-   * Download open-source ONNX weights with redirect handling and byte-level progress
-   */
   private async downloadOnnxModel(status: LocalModelStatus): Promise<{ ok: boolean; message: string }> {
     status.downloading = true;
     status.progressPercent = 0;
@@ -588,7 +876,6 @@ export class LocalModelManager {
         const targetDir = path.join(baseDir, 'parakeet-tdt');
         if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
 
-        // Manifest from official k2-fsa / HuggingFace repository
         const files = [
           {
             name: 'tokens.txt',
@@ -624,7 +911,6 @@ export class LocalModelManager {
           });
         }
 
-        // Initialize recognizer once files are in place
         this.ensureRecognizer();
       } else if (status.id === 'speaker-diarization-onnx') {
         const targetDir = path.join(baseDir, 'diarization');
@@ -670,7 +956,6 @@ export class LocalModelManager {
           });
         }
 
-        // Initialize recognizers once files are in place
         this.ensureWhisperRecognizer('hi');
         this.ensureWhisperRecognizer('en');
       }
@@ -678,7 +963,7 @@ export class LocalModelManager {
       status.downloading = false;
       status.installed = true;
       status.progressPercent = 100;
-      status.statusMessage = 'ONNX model files successfully downloaded and verified!';
+      status.statusMessage = 'ONNX model files downloaded and verified!';
       this.broadcastProgress(status);
 
       return { ok: true, message: `Downloaded ${status.name}` };
@@ -691,9 +976,6 @@ export class LocalModelManager {
     }
   }
 
-  /**
-   * Robust HTTPS file downloader following 301/302/307 redirects
-   */
   private downloadFileHttps(
     urlStr: string,
     destPath: string,
@@ -708,7 +990,12 @@ export class LocalModelManager {
         const client = currentUrl.startsWith('https') ? https : http;
         client
           .get(currentUrl, (res) => {
-            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            if (
+              res.statusCode &&
+              res.statusCode >= 300 &&
+              res.statusCode < 400 &&
+              res.headers.location
+            ) {
               const nextUrl = new URL(res.headers.location, currentUrl).href;
               return makeRequest(nextUrl, redirectCount + 1);
             }
@@ -752,23 +1039,19 @@ export class LocalModelManager {
     windowManager.broadcastToAllWindows('models:progress', { ...status });
   }
 
-  /**
-   * Embedded Local Inference HTTP Server on 127.0.0.1:50051
-   * Exposes /health and /v1/audio/transcriptions
-   */
-  public async startLocalServer(port: number = 50051): Promise<{ ok: boolean; port: number; message: string }> {
+  public async startLocalServer(
+    port: number = 50051
+  ): Promise<{ ok: boolean; port: number; message: string }> {
     if (this.isServerRunning && this.localServer) {
       return { ok: true, port: this.serverPort, message: 'Server is already running' };
     }
 
     this.serverPort = port;
-    // Pre-warm local recognizers with lightweight memory footprint
     this.ensureRecognizer();
     this.ensureWhisperRecognizer('');
 
     return new Promise((resolve) => {
       const server = http.createServer(async (req, res) => {
-        // CORS Headers
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -781,7 +1064,6 @@ export class LocalModelManager {
 
         const url = req.url || '/';
 
-        // 1. Health check endpoint
         if (url === '/health' || url === '/') {
           const isReady = this.ensureRecognizer();
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -797,7 +1079,6 @@ export class LocalModelManager {
           return;
         }
 
-        // 2. Transcription endpoint (OpenAI / NVIDIA verbose_json compliant)
         if (url.startsWith('/v1/audio/transcriptions')) {
           if (req.method !== 'POST') {
             res.writeHead(405, { 'Content-Type': 'application/json' });
@@ -814,8 +1095,6 @@ export class LocalModelManager {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(result));
             } catch (err: unknown) {
-              console.warn('[LocalServer] Transcription unready or failed:', err);
-              // CRITICAL: Return 503 so transcriptionService immediately falls back to real upstream engines
               res.writeHead(503, { 'Content-Type': 'application/json' });
               res.end(
                 JSON.stringify({
@@ -828,18 +1107,15 @@ export class LocalModelManager {
           return;
         }
 
-        // 3. Fallback 404
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Endpoint not found' }));
       });
 
       server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-          console.warn(`[LocalServer] Port ${port} is in use; server is active`);
           this.isServerRunning = true;
           resolve({ ok: true, port, message: `Port ${port} already active` });
         } else {
-          console.error('[LocalServer] Failed to bind server:', err);
           resolve({ ok: false, port, message: err.message });
         }
       });
@@ -847,7 +1123,6 @@ export class LocalModelManager {
       server.listen(port, '127.0.0.1', () => {
         this.isServerRunning = true;
         this.localServer = server;
-        console.log(`[LocalServer] Embedded NVIDIA speech server listening on http://127.0.0.1:${port}`);
         resolve({
           ok: true,
           port,
@@ -857,9 +1132,6 @@ export class LocalModelManager {
     });
   }
 
-  /**
-   * High-accuracy local speech processing via Sherpa-ONNX Parakeet-TDT 0.6B INT8
-   */
   public async transcribeWavBuffer(
     uploadBuffer: Buffer
   ): Promise<{
@@ -868,7 +1140,7 @@ export class LocalModelManager {
     duration: number;
     segments: Array<{ id: number; start: number; end: number; text: string; speaker: string }>;
   }> {
-    return this.handleAudioTranscription(uploadBuffer);
+    return this.runExclusiveDecode(() => this.handleAudioTranscription(uploadBuffer));
   }
 
   private async handleAudioTranscription(
@@ -879,17 +1151,18 @@ export class LocalModelManager {
     duration: number;
     segments: Array<{ id: number; start: number; end: number; text: string; speaker: string }>;
   }> {
-    // 1. Extract raw audio PCM data from multipart form or WAV stream
     let wavBuffer = uploadBuffer;
     const riffIdx = uploadBuffer.indexOf(Buffer.from('RIFF'));
     if (riffIdx !== -1 && uploadBuffer.length >= riffIdx + 44) {
       const declaredSize = uploadBuffer.readUInt32LE(riffIdx + 4) + 8;
-      wavBuffer = uploadBuffer.subarray(riffIdx, Math.min(uploadBuffer.length, riffIdx + declaredSize));
+      wavBuffer = uploadBuffer.subarray(
+        riffIdx,
+        Math.min(uploadBuffer.length, riffIdx + declaredSize)
+      );
     } else if (uploadBuffer.length < 44) {
       throw new Error('Invalid WAV buffer: buffer too short');
     }
 
-    // 2. Compute audio duration from WAV header
     let durationSec = 1.0;
     if (wavBuffer.length >= 44 && wavBuffer.subarray(0, 4).toString() === 'RIFF') {
       const byteRate = wavBuffer.readUInt32LE(28) || 32000;
@@ -897,13 +1170,11 @@ export class LocalModelManager {
       durationSec = Math.max(0.1, Math.round((dataSize / byteRate) * 100) / 100);
     }
 
-    // 3. Ensure local ONNX recognizer is initialized
     const isReady = this.ensureRecognizer();
     if (!isReady || !this.recognizer) {
       throw new Error('Local ASR model not ready or not installed');
     }
 
-    // 4. Decode audio using native Sherpa-ONNX (enableExternalBuffer=false for Electron V8 compatibility)
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const addon = require('sherpa-onnx-node/addon.js');
     const wave = addon.readWaveFromBinary(Buffer.from(wavBuffer), false);
@@ -921,7 +1192,7 @@ export class LocalModelManager {
     this.recognizer.decode(stream);
     const result = this.recognizer.getResult(stream);
 
-    const recognizedText = (result && result.text) ? String(result.text).trim() : '';
+    const recognizedText = result && result.text ? String(result.text).trim() : '';
 
     return {
       text: recognizedText,
@@ -951,9 +1222,6 @@ export class LocalModelManager {
     this.whisperRecognizers.clear();
   }
 
-  /**
-   * Multilingual local speech processing via Sherpa-ONNX Whisper Base INT8 (Hindi & English)
-   */
   public async transcribeWithWhisperWavBuffer(
     uploadBuffer: Buffer,
     language: string = 'en'
@@ -963,91 +1231,90 @@ export class LocalModelManager {
     duration: number;
     segments: Array<{ id: number; start: number; end: number; text: string; speaker: string }>;
   }> {
-    let langCode = '';
-    const l = (language || '').toLowerCase().trim();
-    if (l.includes('bilingual') || l.includes('auto') || l.includes('multilingual') || !l) {
-      langCode = '';
-    } else if (l === 'hindi' || l === 'hi' || l.includes('hindi')) {
-      langCode = 'hi';
-    } else if (l.includes('english') || l === 'en') {
-      langCode = 'en';
-    } else if (l.includes('spanish') || l === 'es') {
-      langCode = 'es';
-    } else if (l.includes('french') || l === 'fr') {
-      langCode = 'fr';
-    } else if (l.includes('german') || l === 'de') {
-      langCode = 'de';
-    } else if (l.includes('japanese') || l === 'ja') {
-      langCode = 'ja';
-    } else if (l.includes('chinese') || l === 'zh' || l.includes('mandarin')) {
-      langCode = 'zh';
-    } else {
-      langCode = '';
-    }
+    return this.runExclusiveDecode(async () => {
+      let langCode = '';
+      const l = (language || '').toLowerCase().trim();
+      if (l.includes('bilingual') || l.includes('auto') || l.includes('multilingual') || !l) {
+        langCode = '';
+      } else if (l === 'hindi' || l === 'hi' || l.includes('hindi')) {
+        langCode = 'hi';
+      } else if (l.includes('english') || l === 'en') {
+        langCode = 'en';
+      } else if (l.includes('spanish') || l === 'es') {
+        langCode = 'es';
+      } else if (l.includes('french') || l === 'fr') {
+        langCode = 'fr';
+      } else if (l.includes('german') || l === 'de') {
+        langCode = 'de';
+      } else if (l.includes('japanese') || l === 'ja') {
+        langCode = 'ja';
+      } else if (l.includes('chinese') || l === 'zh' || l.includes('mandarin')) {
+        langCode = 'zh';
+      }
 
-    const cacheKey = langCode || 'auto';
+      const cacheKey = langCode || 'auto';
 
-    // 1. Extract raw audio PCM data from multipart form or WAV stream
-    let wavBuffer = uploadBuffer;
-    const riffIdx = uploadBuffer.indexOf(Buffer.from('RIFF'));
-    if (riffIdx !== -1 && uploadBuffer.length >= riffIdx + 44) {
-      const declaredSize = uploadBuffer.readUInt32LE(riffIdx + 4) + 8;
-      wavBuffer = uploadBuffer.subarray(riffIdx, Math.min(uploadBuffer.length, riffIdx + declaredSize));
-    } else if (uploadBuffer.length < 44) {
-      throw new Error('Invalid WAV buffer: buffer too short');
-    }
+      let wavBuffer = uploadBuffer;
+      const riffIdx = uploadBuffer.indexOf(Buffer.from('RIFF'));
+      if (riffIdx !== -1 && uploadBuffer.length >= riffIdx + 44) {
+        const declaredSize = uploadBuffer.readUInt32LE(riffIdx + 4) + 8;
+        wavBuffer = uploadBuffer.subarray(
+          riffIdx,
+          Math.min(uploadBuffer.length, riffIdx + declaredSize)
+        );
+      } else if (uploadBuffer.length < 44) {
+        throw new Error('Invalid WAV buffer: buffer too short');
+      }
 
-    // 2. Compute audio duration from WAV header
-    let durationSec = 1.0;
-    if (wavBuffer.length >= 44 && wavBuffer.subarray(0, 4).toString() === 'RIFF') {
-      const byteRate = wavBuffer.readUInt32LE(28) || 32000;
-      const dataSize = Math.max(0, wavBuffer.length - 44);
-      durationSec = Math.max(0.1, Math.round((dataSize / byteRate) * 100) / 100);
-    }
+      let durationSec = 1.0;
+      if (wavBuffer.length >= 44 && wavBuffer.subarray(0, 4).toString() === 'RIFF') {
+        const byteRate = wavBuffer.readUInt32LE(28) || 32000;
+        const dataSize = Math.max(0, wavBuffer.length - 44);
+        durationSec = Math.max(0.1, Math.round((dataSize / byteRate) * 100) / 100);
+      }
 
-    // 3. Ensure local Whisper recognizer for this language is initialized
-    const isReady = this.ensureWhisperRecognizer(langCode);
-    const rec = this.whisperRecognizers.get(cacheKey);
-    if (!isReady || !rec) {
-      throw new Error(`Local Whisper [${cacheKey}] model not ready or not installed`);
-    }
+      const isReady = this.ensureWhisperRecognizer(langCode);
+      const rec = this.whisperRecognizers.get(cacheKey);
+      if (!isReady || !rec) {
+        throw new Error(`Local Whisper [${cacheKey}] model not ready or not installed`);
+      }
 
-    // 4. Decode audio using native Sherpa-ONNX
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const addon = require('sherpa-onnx-node/addon.js');
-    const wave = addon.readWaveFromBinary(Buffer.from(wavBuffer), false);
-    if (!wave || !wave.samples || wave.samples.length === 0) {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const addon = require('sherpa-onnx-node/addon.js');
+      const wave = addon.readWaveFromBinary(Buffer.from(wavBuffer), false);
+      if (!wave || !wave.samples || wave.samples.length === 0) {
+        return {
+          text: '',
+          language: cacheKey,
+          duration: durationSec,
+          segments: [],
+        };
+      }
+
+      const stream = rec.createStream();
+      stream.acceptWaveform(wave);
+      rec.decode(stream);
+      const result = rec.getResult(stream);
+
+      const recognizedText = result && result.text ? String(result.text).trim() : '';
+
       return {
-        text: '',
+        text: recognizedText,
         language: cacheKey,
         duration: durationSec,
-        segments: [],
+        segments: recognizedText
+          ? [
+              {
+                id: 0,
+                start: 0.0,
+                end: durationSec,
+                text: recognizedText,
+                speaker: 'Speaker 0',
+              },
+            ]
+          : [],
       };
-    }
-
-    const stream = rec.createStream();
-    stream.acceptWaveform(wave);
-    rec.decode(stream);
-    const result = rec.getResult(stream);
-
-    const recognizedText = (result && result.text) ? String(result.text).trim() : '';
-
-    return {
-      text: recognizedText,
-      language: cacheKey,
-      duration: durationSec,
-      segments: recognizedText
-        ? [
-            {
-              id: 0,
-              start: 0.0,
-              end: durationSec,
-              text: recognizedText,
-              speaker: 'Speaker 0',
-            },
-          ]
-        : [],
-    };
+    });
   }
 }
 

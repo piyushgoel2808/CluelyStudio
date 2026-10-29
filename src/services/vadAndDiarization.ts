@@ -50,7 +50,6 @@ export function encodePcmToWavBase64Client(pcmInt16: Int16Array, sampleRate: num
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
 
-  // RIFF identifier
   view.setUint8(0, 'R'.charCodeAt(0));
   view.setUint8(1, 'I'.charCodeAt(0));
   view.setUint8(2, 'F'.charCodeAt(0));
@@ -61,32 +60,28 @@ export function encodePcmToWavBase64Client(pcmInt16: Int16Array, sampleRate: num
   view.setUint8(10, 'V'.charCodeAt(0));
   view.setUint8(11, 'E'.charCodeAt(0));
 
-  // fmt subchunk
   view.setUint8(12, 'f'.charCodeAt(0));
   view.setUint8(13, 'm'.charCodeAt(0));
   view.setUint8(14, 't'.charCodeAt(0));
   view.setUint8(15, ' '.charCodeAt(0));
   view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
+  view.setUint16(20, 1, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, byteRate, true);
   view.setUint16(32, blockAlign, true);
   view.setUint16(34, bitsPerSample, true);
 
-  // data subchunk
   view.setUint8(36, 'd'.charCodeAt(0));
   view.setUint8(37, 'a'.charCodeAt(0));
   view.setUint8(38, 't'.charCodeAt(0));
   view.setUint8(39, 'a'.charCodeAt(0));
   view.setUint32(40, dataSize, true);
 
-  // Copy PCM data
   const pcmBytes = new Uint8Array(pcmInt16.buffer, pcmInt16.byteOffset, pcmInt16.byteLength);
   const targetBytes = new Uint8Array(buffer, 44);
   targetBytes.set(pcmBytes);
 
-  // Convert binary ArrayBuffer to Base64
   let binary = '';
   const bytes = new Uint8Array(buffer);
   const len = bytes.byteLength;
@@ -98,11 +93,6 @@ export function encodePcmToWavBase64Client(pcmInt16: Int16Array, sampleRate: num
   return btoa(binary);
 }
 
-/**
- * Real Acoustic Feature Extractor:
- * Computes 24-element normalized feature vector:
- * 16 MFCCs + Mean Pitch F0 (75-350Hz) + Spectral Centroid + 6 Subband Spectral Energies
- */
 export function extractVoiceprintAndPitch(
   pcmInt16: Int16Array,
   sampleRate: number = 16000
@@ -112,15 +102,13 @@ export function extractVoiceprintAndPitch(
     return { voiceprint: new Array(24).fill(0), pitchMeanHz: 130 };
   }
 
-  // Convert to Float32
   const samples = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     samples[i] = pcmInt16[i] / 32768.0;
   }
 
-  // 1. Autocorrelation Pitch Detector (75Hz to 350Hz)
-  const minLag = Math.floor(sampleRate / 350); // ~45 samples
-  const maxLag = Math.floor(sampleRate / 75); // ~213 samples
+  const minLag = Math.floor(sampleRate / 350);
+  const maxLag = Math.floor(sampleRate / 75);
   const frameSize = 1024;
   let totalPitch = 0;
   let pitchCount = 0;
@@ -159,13 +147,10 @@ export function extractVoiceprintAndPitch(
 
   const pitchMeanHz = pitchCount > 0 ? totalPitch / pitchCount : 135;
 
-  // 2. Frequency Analysis & Mel Filterbanks
   const fftSize = 512;
   const numFilters = 20;
   const numCoeffs = 16;
   const melEnergies = new Float32Array(numFilters);
-
-  // Compute average magnitude spectrum across frames
   const magSpectrum = new Float32Array(fftSize / 2);
   let numFftFrames = 0;
 
@@ -191,7 +176,6 @@ export function extractVoiceprintAndPitch(
     }
   }
 
-  // Spectral Centroid
   let sumFreqMag = 0;
   let sumMag = 0;
   for (let k = 0; k < magSpectrum.length; k++) {
@@ -201,7 +185,6 @@ export function extractVoiceprintAndPitch(
   }
   const spectralCentroid = sumMag > 0 ? sumFreqMag / sumMag : 1200;
 
-  // Mel Filterbank calculation (200Hz to 7500Hz)
   const hzToMel = (hz: number) => 2595 * Math.log10(1 + hz / 700);
   const melToHz = (mel: number) => 700 * (Math.pow(10, mel / 2595) - 1);
   const melMin = hzToMel(200);
@@ -231,7 +214,6 @@ export function extractVoiceprintAndPitch(
     melEnergies[m - 1] = Math.log(Math.max(1e-5, energy));
   }
 
-  // Discrete Cosine Transform (DCT-II) -> 16 MFCCs
   const mfcc = new Array(numCoeffs);
   for (let i = 0; i < numCoeffs; i++) {
     let sum = 0;
@@ -241,7 +223,6 @@ export function extractVoiceprintAndPitch(
     mfcc[i] = sum;
   }
 
-  // 6 Subband energy ratios
   const subbands = [
     melEnergies[0] + melEnergies[1],
     melEnergies[2] + melEnergies[3] + melEnergies[4],
@@ -251,7 +232,6 @@ export function extractVoiceprintAndPitch(
     melEnergies[14] + melEnergies[15] + melEnergies[16],
   ];
 
-  // Assemble 24-element feature vector
   const rawVector = [
     ...mfcc,
     pitchMeanHz / 350.0,
@@ -259,7 +239,6 @@ export function extractVoiceprintAndPitch(
     ...subbands,
   ];
 
-  // Normalize to L2 unit norm
   let norm = 0;
   for (const v of rawVector) norm += v * v;
   const l2 = Math.sqrt(norm) || 1;
@@ -280,22 +259,25 @@ export interface VADSegmentResult {
 
 export class RealTimeVAD {
   private bufferChunks: Int16Array[] = [];
-  // Rolling 600ms pre-roll ring buffer (9600 samples at 16kHz) to capture speech onset
   private preRollChunks: Int16Array[] = [];
   private readonly maxPreRollSamples: number = 9600; // 600ms at 16kHz
 
+  // Rolling 6-second continuous backup ring buffer (96,000 samples at 16kHz)
+  // Ensures forceFlush (⌘↵) can ALWAYS grab recent audio even if VAD threshold wasn't crossed
+  private rollingBackupChunks: Int16Array[] = [];
+  private readonly maxRollingBackupSamples: number = 96000;
+  private lastFlushedTimestamp: number = 0;
+
   private speechStartTimestamp: number | null = null;
   private lastVoicedTimestamp: number | null = null;
-  private lastPartialEmitTimestamp: number = 0;
-  private adaptiveNoiseFloor: number = 0.003;
+  private adaptiveNoiseFloor: number = 0.002;
   private consecutiveVoicedFrames: number = 0;
   private isSpeaking: boolean = false;
 
-  private readonly minSpeechDurationMs = 200;
-  private readonly maxSegmentMs = 35000; // 35 seconds to hold long multi-sentence questions
+  private readonly minSpeechDurationMs = 160;
+  private readonly maxSegmentMs = 18000;
 
-  private silenceHangoverMs: number = 1300; // Balanced: 1300ms to bridge breathing pauses
-  private partialEmissionIntervalMs: number = 600;
+  private silenceHangoverMs: number = 600;
 
   constructor(profile: NvidiaLatencyProfile = 'balanced') {
     this.setLatencyProfile(profile);
@@ -303,15 +285,11 @@ export class RealTimeVAD {
 
   public setLatencyProfile(profile: NvidiaLatencyProfile): void {
     if (profile === 'ultra-low') {
-      this.silenceHangoverMs = 850;
-      this.partialEmissionIntervalMs = 400;
+      this.silenceHangoverMs = 420;
     } else if (profile === 'high-accuracy') {
-      this.silenceHangoverMs = 1800;
-      this.partialEmissionIntervalMs = 800;
+      this.silenceHangoverMs = 900;
     } else {
-      // balanced default: 1300ms silence hangover
-      this.silenceHangoverMs = 1300;
-      this.partialEmissionIntervalMs = 600;
+      this.silenceHangoverMs = 600;
     }
   }
 
@@ -322,7 +300,17 @@ export class RealTimeVAD {
     const n = pcmChunk.length;
     if (n === 0) return null;
 
-    // Frame RMS energy
+    // Always append to rolling 6s backup buffer
+    this.rollingBackupChunks.push(new Int16Array(pcmChunk));
+    let rollingSamples = this.rollingBackupChunks.reduce((acc, c) => acc + c.length, 0);
+    while (
+      this.rollingBackupChunks.length > 1 &&
+      rollingSamples - this.rollingBackupChunks[0].length >= this.maxRollingBackupSamples
+    ) {
+      const dropped = this.rollingBackupChunks.shift();
+      if (dropped) rollingSamples -= dropped.length;
+    }
+
     let sumSquares = 0;
     for (let i = 0; i < n; i++) {
       const norm = pcmChunk[i] / 32768.0;
@@ -330,11 +318,11 @@ export class RealTimeVAD {
     }
     const rms = Math.sqrt(sumSquares / n);
 
-    // Update adaptive noise floor only during true non-speech silence
-    if (!this.isSpeaking && rms < 0.008) {
-      this.adaptiveNoiseFloor = 0.95 * this.adaptiveNoiseFloor + 0.05 * Math.max(0.0008, rms);
+    if (!this.isSpeaking && rms < 0.005) {
+      this.adaptiveNoiseFloor = 0.95 * this.adaptiveNoiseFloor + 0.05 * Math.max(0.0006, rms);
     }
-    const threshold = Math.max(0.0035, this.adaptiveNoiseFloor * 1.4);
+    // Sensitive threshold (0.0018) so quiet mic speech and laptop loopback audio trigger reliably
+    const threshold = Math.max(0.0018, this.adaptiveNoiseFloor * 1.3);
 
     const isVoiced = rms > threshold;
 
@@ -342,12 +330,10 @@ export class RealTimeVAD {
       this.consecutiveVoicedFrames++;
       this.lastVoicedTimestamp = timestamp;
 
-      if (!this.isSpeaking && this.consecutiveVoicedFrames >= 2) {
+      if (!this.isSpeaking && this.consecutiveVoicedFrames >= 1) {
         this.isSpeaking = true;
-        this.speechStartTimestamp = timestamp - 320; // Include speech onset
-        this.lastPartialEmitTimestamp = timestamp;
+        this.speechStartTimestamp = timestamp - 300;
 
-        // Prepend rolling pre-roll audio so initial consonants (p, b, t, d, k, g, m, n, h, s) are never clipped
         this.bufferChunks = [...this.preRollChunks];
         this.preRollChunks = [];
       }
@@ -356,10 +342,12 @@ export class RealTimeVAD {
     }
 
     if (!this.isSpeaking) {
-      // Maintain rolling 600ms pre-roll buffer during silence
       this.preRollChunks.push(new Int16Array(pcmChunk));
       let currentPreRollSamples = this.preRollChunks.reduce((acc, c) => acc + c.length, 0);
-      while (this.preRollChunks.length > 1 && currentPreRollSamples - this.preRollChunks[0].length >= this.maxPreRollSamples) {
+      while (
+        this.preRollChunks.length > 1 &&
+        currentPreRollSamples - this.preRollChunks[0].length >= this.maxPreRollSamples
+      ) {
         const removed = this.preRollChunks.shift();
         if (removed) currentPreRollSamples -= removed.length;
       }
@@ -368,109 +356,97 @@ export class RealTimeVAD {
 
     this.bufferChunks.push(pcmChunk);
 
-      const speechStart = this.speechStartTimestamp || timestamp;
-      const speechDuration = timestamp - speechStart;
-      const silenceDuration = timestamp - (this.lastVoicedTimestamp || timestamp);
+    const speechStart = this.speechStartTimestamp || timestamp;
+    const speechDuration = timestamp - speechStart;
+    const silenceDuration = timestamp - (this.lastVoicedTimestamp || timestamp);
 
-      // 1. Check for segment flush (silence hangover reached or max segment length reached)
-      if (silenceDuration >= this.silenceHangoverMs || speechDuration >= this.maxSegmentMs) {
-        const totalSamples = this.bufferChunks.reduce((acc, c) => acc + c.length, 0);
-        if (totalSamples > 1600 && speechDuration >= this.minSpeechDurationMs) {
-          const merged = new Int16Array(totalSamples);
-          let offset = 0;
-          for (const c of this.bufferChunks) {
-            merged.set(c, offset);
-            offset += c.length;
-          }
-
-          const { voiceprint, pitchMeanHz } = extractVoiceprintAndPitch(merged, 16000);
-
-          // Reset VAD state for next utterance
-          this.isSpeaking = false;
-          this.speechStartTimestamp = null;
-          this.lastVoicedTimestamp = null;
-          this.lastPartialEmitTimestamp = 0;
-          this.consecutiveVoicedFrames = 0;
-          this.bufferChunks = [];
-
-          return {
-            pcmInt16: merged,
-            durationMs: speechDuration,
-            voiceprint,
-            pitchMeanHz,
-            isPartial: false,
-            startTimeOffsetMs: speechStart,
-            endTimeOffsetMs: timestamp,
-          };
-        } else {
-          // Too short or cough click, discard
-          this.isSpeaking = false;
-          this.bufferChunks = [];
+    if (silenceDuration >= this.silenceHangoverMs || speechDuration >= this.maxSegmentMs) {
+      const totalSamples = this.bufferChunks.reduce((acc, c) => acc + c.length, 0);
+      if (totalSamples > 1600 && speechDuration >= this.minSpeechDurationMs) {
+        const merged = new Int16Array(totalSamples);
+        let offset = 0;
+        for (const c of this.bufferChunks) {
+          merged.set(c, offset);
+          offset += c.length;
         }
+
+        const { voiceprint, pitchMeanHz } = extractVoiceprintAndPitch(merged, 16000);
+
+        this.isSpeaking = false;
+        this.speechStartTimestamp = null;
+        this.lastVoicedTimestamp = null;
+        this.consecutiveVoicedFrames = 0;
+        this.bufferChunks = [];
+        this.rollingBackupChunks = [];
+        this.lastFlushedTimestamp = timestamp;
+
+        return {
+          pcmInt16: merged,
+          durationMs: speechDuration,
+          voiceprint,
+          pitchMeanHz,
+          isPartial: false,
+          startTimeOffsetMs: speechStart,
+          endTimeOffsetMs: timestamp,
+        };
+      } else {
+        this.isSpeaking = false;
+        this.bufferChunks = [];
       }
-
-      // 2. Check for intermediate partial frame emission (Nemotron streaming)
-      if (
-        this.isSpeaking &&
-        timestamp - this.lastPartialEmitTimestamp >= this.partialEmissionIntervalMs
-      ) {
-        const totalSamples = this.bufferChunks.reduce((acc, c) => acc + c.length, 0);
-        if (totalSamples >= 3200) {
-          // At least 200ms of audio
-          this.lastPartialEmitTimestamp = timestamp;
-
-          const merged = new Int16Array(totalSamples);
-          let offset = 0;
-          for (const c of this.bufferChunks) {
-            merged.set(c, offset);
-            offset += c.length;
-          }
-
-          const { voiceprint, pitchMeanHz } = extractVoiceprintAndPitch(merged, 16000);
-
-          return {
-            pcmInt16: merged,
-            durationMs: speechDuration,
-            voiceprint,
-            pitchMeanHz,
-            isPartial: true,
-            startTimeOffsetMs: speechStart,
-            endTimeOffsetMs: timestamp,
-          };
-        }
-      }
+    }
 
     return null;
   }
 
   /**
-   * Immediately flush any buffered speech samples without waiting for silence hangover.
-   * Called when the user presses Command+Enter or hits Assist so spoken speech is
-   * committed to ASR before the AI router queries context.
+   * Immediately flush any buffered speech samples when ⌘↵ or Assist is triggered.
+   * If active bufferChunks is empty and no segment was flushed in the last 1.8s,
+   * falls back to the rolling 6s backup buffer if it contains audible energy!
    */
   public forceFlush(): VADSegmentResult | null {
-    const totalSamples = this.bufferChunks.reduce((acc, c) => acc + c.length, 0);
-    // At least 100ms of audio (1600 samples at 16kHz) and speech was active or buffered
-    if (totalSamples >= 1600 && (this.isSpeaking || this.bufferChunks.length > 0)) {
+    const now = Date.now();
+    let chunksToFlush = this.bufferChunks;
+
+    let totalSamples = chunksToFlush.reduce((acc, c) => acc + c.length, 0);
+    if (totalSamples < 1600 && now - this.lastFlushedTimestamp > 1800) {
+      // Check if rollingBackupChunks has audible speech energy
+      const backupSamples = this.rollingBackupChunks.reduce((acc, c) => acc + c.length, 0);
+      if (backupSamples >= 3200) {
+        let sumSq = 0;
+        for (const c of this.rollingBackupChunks) {
+          for (let i = 0; i < c.length; i++) {
+            const norm = c[i] / 32768.0;
+            sumSq += norm * norm;
+          }
+        }
+        const backupRms = Math.sqrt(sumSq / backupSamples);
+        if (backupRms > 0.0012) {
+          chunksToFlush = this.rollingBackupChunks;
+          totalSamples = backupSamples;
+        }
+      }
+    }
+
+    if (totalSamples >= 1600) {
       const merged = new Int16Array(totalSamples);
       let offset = 0;
-      for (const c of this.bufferChunks) {
+      for (const c of chunksToFlush) {
         merged.set(c, offset);
         offset += c.length;
       }
 
       const { voiceprint, pitchMeanHz } = extractVoiceprintAndPitch(merged, 16000);
-      const now = Date.now();
-      const speechStart = this.speechStartTimestamp || (now - Math.round((totalSamples / 16000) * 1000));
       const speechDuration = Math.round((totalSamples / 16000) * 1000);
+      const speechStart = this.speechStartTimestamp || now - speechDuration;
 
       this.isSpeaking = false;
       this.bufferChunks = [];
       this.preRollChunks = [];
+      this.rollingBackupChunks = [];
       this.speechStartTimestamp = null;
       this.lastVoicedTimestamp = null;
-      this.lastPartialEmitTimestamp = 0;
       this.consecutiveVoicedFrames = 0;
+      this.lastFlushedTimestamp = now;
 
       return {
         pcmInt16: merged,
@@ -490,9 +466,9 @@ export class RealTimeVAD {
   public reset(): void {
     this.bufferChunks = [];
     this.preRollChunks = [];
+    this.rollingBackupChunks = [];
     this.speechStartTimestamp = null;
     this.lastVoicedTimestamp = null;
-    this.lastPartialEmitTimestamp = 0;
     this.isSpeaking = false;
     this.consecutiveVoicedFrames = 0;
   }
@@ -528,7 +504,6 @@ export class SpeakerDiarizer {
   ): ResolvedSpeaker {
     const userProfile = savedProfiles.find((p) => p.isSelf);
 
-    // Audio from the user's local microphone is always the user (Me)
     if (sourceChannel === 'mic') {
       return {
         role: 'me',
@@ -539,12 +514,10 @@ export class SpeakerDiarizer {
       };
     }
 
-    // System Audio Loopback -> Them (interviewer / other meeting participants)
     if (meetingEnvironment === 'online') {
       return this.clusterThemSpeaker(voiceprint, savedProfiles);
     }
 
-    // MODE B: Offline In-Person Room Meeting
     if (userProfile && userProfile.mfccCentroid.length === voiceprint.length) {
       const simWithSelf = cosineSimilarity(voiceprint, userProfile.mfccCentroid);
       if (simWithSelf >= 0.78) {
@@ -558,7 +531,6 @@ export class SpeakerDiarizer {
       }
     }
 
-    // Physical room participant (Them)
     return this.clusterRoomParticipant(voiceprint);
   }
 
@@ -566,13 +538,12 @@ export class SpeakerDiarizer {
     voiceprint: number[],
     savedProfiles: SpeakerVoiceProfile[]
   ): ResolvedSpeaker {
-    // Check against saved colleague profiles first
     for (let idx = 0; idx < savedProfiles.length; idx++) {
       const profile = savedProfiles[idx];
       if (!profile.isSelf && profile.mfccCentroid.length === voiceprint.length) {
         const sim = cosineSimilarity(voiceprint, profile.mfccCentroid);
         if (sim >= 0.82) {
-          const trackIndex = (idx % 3) + 1; // 1, 2, or 3
+          const trackIndex = (idx % 3) + 1;
           return {
             role: 'them',
             speakerId: profile.id,
@@ -584,7 +555,6 @@ export class SpeakerDiarizer {
       }
     }
 
-    // Match against active session remote speakers
     let bestMatch: SpeakerCluster | null = null;
     let highestSim = -1;
 
@@ -611,8 +581,7 @@ export class SpeakerDiarizer {
       };
     }
 
-    // Create new remote speaker track (Track 1, 2, or 3)
-    const trackIndex = ((this.remoteSpeakers.length % 3) + 1);
+    const trackIndex = (this.remoteSpeakers.length % 3) + 1;
     const newId = `speaker_${this.remoteCounter}`;
     const newLabel = `Speaker ${this.remoteCounter}`;
     this.remoteCounter++;
@@ -662,10 +631,9 @@ export class SpeakerDiarizer {
       };
     }
 
-    // Letter-coded participant: Participant A, B, C...
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const letter = letters[this.participantCounter % letters.length];
-    const trackIndex = ((this.roomParticipants.length % 3) + 1);
+    const trackIndex = (this.roomParticipants.length % 3) + 1;
     const newId = `participant_${letter.toLowerCase()}`;
     const newLabel = `Participant ${letter}`;
     this.participantCounter++;

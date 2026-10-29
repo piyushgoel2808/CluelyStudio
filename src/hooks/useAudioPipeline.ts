@@ -8,10 +8,6 @@ import {
   formatTimestamp,
 } from '../services/vadAndDiarization';
 
-/**
- * Continuous stateful linear-interpolation resampler across block boundaries.
- * Prevents phase clicks, sample truncation, and 23Hz audio aliasing buzzing.
- */
 class ContinuousResampler {
   private inSampleRate: number;
   private outSampleRate: number;
@@ -66,28 +62,70 @@ class ContinuousResampler {
 }
 
 export function useAudioPipeline(state: AppState | null) {
-  const isSessionActive = Boolean(state?.isSessionActive);
-  const meetingEnvironment = state?.meetingEnvironment || 'online';
-  const voiceProfiles = state?.voiceProfiles || [];
   const latencyProfile = state?.aiConfig?.nvidiaSpeech?.latencyProfile || 'balanced';
+  const selectedMicDeviceId = state?.selectedMicDeviceId || 'default';
+
+  // Store mutable config in a ref so handleVADResult & startAudioCapture NEVER recreate
+  // and NEVER tear down the AudioContext when state updates or during AI streaming!
+  const configRef = useRef({
+    meetingEnvironment: state?.meetingEnvironment || ('online' as const),
+    voiceProfiles: state?.voiceProfiles || [],
+  });
+  configRef.current = {
+    meetingEnvironment: state?.meetingEnvironment || 'online',
+    voiceProfiles: state?.voiceProfiles || [],
+  };
 
   const [micLevel, setMicLevel] = useState<number>(0);
   const [systemLevel, setSystemLevel] = useState<number>(0);
+  const systemLevelRef = useRef<number>(0);
   const [combinedBands, setCombinedBands] = useState<number[]>([0.15, 0.25, 0.35, 0.2, 0.3]);
   const [segments, setSegments] = useState<TranscriptSegment[]>(() => state?.transcripts || []);
+  const latestSegmentsRef = useRef<TranscriptSegment[]>(state?.transcripts || []);
 
   const sessionStartTimeRef = useRef<number>(Date.now());
   const micVADRef = useRef<RealTimeVAD>(new RealTimeVAD(latencyProfile));
   const sysVADRef = useRef<RealTimeVAD>(new RealTimeVAD(latencyProfile));
   const diarizerRef = useRef<SpeakerDiarizer>(new SpeakerDiarizer());
 
-  // Sync historical transcripts from persisted state
-  useEffect(() => {
-    if (state?.transcripts && state.transcripts.length > 0) {
-      setSegments((prev) => {
-        if (prev.length === 0) return state.transcripts;
-        return prev;
+  // Merge helper so both IPC events and direct promise returns update latestSegmentsRef immediately
+  const mergeIncomingSegment = useCallback((newSegment: TranscriptSegment) => {
+    setSegments((prev) => {
+      const newBaseId = newSegment.id.replace(/_(part|fin)$/, '');
+      const existingIdx = prev.findIndex((s) => {
+        if (s.id === newSegment.id) return true;
+        const sBaseId = s.id.replace(/_(part|fin)$/, '');
+        if (sBaseId === newBaseId) return true;
+        if (
+          s.isPartial &&
+          s.speakerId === newSegment.speakerId &&
+          Math.abs(s.startTimeMs - newSegment.startTimeMs) < 1500
+        ) {
+          return true;
+        }
+        return false;
       });
+
+      let next: TranscriptSegment[];
+      if (existingIdx !== -1) {
+        if (prev[existingIdx].isPartial) {
+          next = [...prev];
+          next[existingIdx] = newSegment;
+        } else {
+          next = prev;
+        }
+      } else {
+        next = [newSegment, ...prev];
+      }
+      latestSegmentsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (state?.transcripts && state.transcripts.length > 0 && latestSegmentsRef.current.length === 0) {
+      latestSegmentsRef.current = state.transcripts;
+      setSegments(state.transcripts);
     }
   }, [state?.transcripts]);
 
@@ -97,80 +135,42 @@ export function useAudioPipeline(state: AppState | null) {
   const desktopLoopbackContextRef = useRef<AudioContext | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // Update VAD latency profile if changed in state
   useEffect(() => {
     micVADRef.current.setLatencyProfile(latencyProfile);
     sysVADRef.current.setLatencyProfile(latencyProfile);
   }, [latencyProfile]);
 
-  // Track session start time
-  useEffect(() => {
-    if (isSessionActive) {
-      sessionStartTimeRef.current = Date.now();
-    }
-  }, [isSessionActive]);
-
-  // Sync incoming segments from IPC (handles both partial streaming & finalized replacement)
   useEffect(() => {
     if (window.cluely && window.cluely.onTranscriptSegment) {
       const unsub = window.cluely.onTranscriptSegment((newSegment) => {
-        setSegments((prev) => {
-          const newBaseId = newSegment.id.replace(/_(part|fin)$/, '');
-          const existingIdx = prev.findIndex((s) => {
-            if (s.id === newSegment.id) return true;
-            const sBaseId = s.id.replace(/_(part|fin)$/, '');
-            if (sBaseId === newBaseId) return true;
-            if (
-              s.isPartial &&
-              s.speakerId === newSegment.speakerId &&
-              Math.abs(s.startTimeMs - newSegment.startTimeMs) < 1500
-            ) {
-              return true;
-            }
-            return false;
-          });
-
-          if (existingIdx !== -1) {
-            // Only overwrite if the existing segment was a partial preview of this utterance
-            if (prev[existingIdx].isPartial) {
-              const updated = [...prev];
-              updated[existingIdx] = newSegment;
-              return updated;
-            }
-            // If already finalized with same ID, ignore duplicate
-            if (prev[existingIdx].id === newSegment.id) {
-              return prev;
-            }
-          }
-
-          return [newSegment, ...prev];
-        });
+        mergeIncomingSegment(newSegment);
       });
       return unsub;
     }
-  }, []);
+  }, [mergeIncomingSegment]);
 
-  // Listen to system audio levels from audiotee via IPC
   useEffect(() => {
     if (window.cluely && window.cluely.onSystemAudioLevel) {
       const unsub = window.cluely.onSystemAudioLevel(({ rms }) => {
+        systemLevelRef.current = rms;
         setSystemLevel(rms);
       });
       return unsub;
     }
   }, []);
 
-  const inFlightTranscriptionsRef = useRef<Set<Promise<unknown>>>(new Set());
+  const inFlightTranscriptionsRef = useRef<Set<Promise<TranscriptSegment | null>>>(new Set());
 
-  // Helper to transcribe a detected speech utterance
+  // Stable callback with zero changing state dependencies
   const handleVADResult = useCallback(
     (
       vadResult: ReturnType<RealTimeVAD['processChunk']>,
       sourceChannel: 'mic' | 'system'
-    ): Promise<unknown> | null => {
+    ): Promise<TranscriptSegment | null> | null => {
       if (!vadResult || !window.cluely?.transcribeSegment) return null;
 
       const wavBase64 = encodePcmToWavBase64Client(vadResult.pcmInt16);
+      const { meetingEnvironment, voiceProfiles } = configRef.current;
       const speakerInfo = diarizerRef.current.resolveSpeaker(
         vadResult.voiceprint,
         sourceChannel,
@@ -183,18 +183,29 @@ export function useAudioPipeline(state: AppState | null) {
       const endMs = Math.max(startMs + 100, (vadResult.endTimeOffsetMs || Date.now()) - sessionStart);
       const formattedTs = formatTimestamp(startMs, endMs);
 
-      const p = window.cluely.transcribeSegment({
-        wavBase64,
-        role: speakerInfo.role,
-        speakerId: speakerInfo.speakerId,
-        speakerLabel: speakerInfo.speakerLabel,
-        durationMs: vadResult.durationMs,
-        startTimeMs: startMs,
-        endTimeMs: endMs,
-        formattedTimestamp: formattedTs,
-        speakerColor: speakerInfo.speakerColor,
-        isPartial: vadResult.isPartial,
-      });
+      const p = window.cluely
+        .transcribeSegment({
+          wavBase64,
+          role: speakerInfo.role,
+          speakerId: speakerInfo.speakerId,
+          speakerLabel: speakerInfo.speakerLabel,
+          durationMs: vadResult.durationMs,
+          startTimeMs: startMs,
+          endTimeMs: endMs,
+          formattedTimestamp: formattedTs,
+          speakerColor: speakerInfo.speakerColor,
+          isPartial: false,
+        })
+        .then((seg) => {
+          if (seg) {
+            mergeIncomingSegment(seg);
+          }
+          return seg;
+        })
+        .catch((err) => {
+          console.warn('[useAudioPipeline] transcribeSegment error:', err);
+          return null;
+        });
 
       inFlightTranscriptionsRef.current.add(p);
       p.finally(() => {
@@ -203,43 +214,39 @@ export function useAudioPipeline(state: AppState | null) {
 
       return p;
     },
-    [meetingEnvironment, voiceProfiles]
+    [mergeIncomingSegment]
   );
 
   /**
-   * Force-flush pending speech from both Mic & System VAD instances and await
-   * all in-flight ASR segment transcriptions. Used on Command+Enter before asking AI.
+   * Force-flushes both Mic & System VAD buffers and returns the latest TranscriptSegment[]
+   * directly so App.tsx never reads a stale React closure!
    */
-  const flushAndWaitForTranscription = useCallback(async (): Promise<void> => {
-    const promises: Promise<unknown>[] = [];
+  const flushAndWaitForTranscription = useCallback(async (): Promise<TranscriptSegment[]> => {
+    const promises: Promise<TranscriptSegment | null>[] = [];
 
-    // Flush microphone VAD
     const micFlushed = micVADRef.current.forceFlush();
     if (micFlushed) {
       const p = handleVADResult(micFlushed, 'mic');
       if (p) promises.push(p);
     }
 
-    // Flush system loopback VAD
     const sysFlushed = sysVADRef.current.forceFlush();
     if (sysFlushed) {
       const p = handleVADResult(sysFlushed, 'system');
       if (p) promises.push(p);
     }
 
-    // Await all local transcription promises and any ongoing in-flight ones
     const inFlight = Array.from(inFlightTranscriptionsRef.current);
     await Promise.allSettled([...promises, ...inFlight]);
+    return latestSegmentsRef.current;
   }, [handleVADResult]);
 
   const flushPendingSpeech = flushAndWaitForTranscription;
 
-  // Listen to raw system PCM chunks from audiotee
+  // Always process system PCM chunks from audiotee (100% continuous, even when session toggle is off or while answering)
   useEffect(() => {
     if (window.cluely && window.cluely.onSystemPcmChunk) {
       const unsub = window.cluely.onSystemPcmChunk(({ pcmBase64 }) => {
-        if (!isSessionActive) return;
-
         try {
           const binaryStr = atob(pcmBase64);
           const numSamples = Math.floor(binaryStr.length / 2);
@@ -263,13 +270,13 @@ export function useAudioPipeline(state: AppState | null) {
       });
       return unsub;
     }
-  }, [isSessionActive, handleVADResult]);
+  }, [handleVADResult]);
 
-  // Handle fallback desktop audio capture if audiotee is not available
+  // Always-on fallback desktop audio capture if audiotee is unavailable
   useEffect(() => {
     if (window.cluely && window.cluely.onUseDesktopAudioFallback) {
       const unsub = window.cluely.onUseDesktopAudioFallback(async () => {
-        if (!isSessionActive || desktopLoopbackStreamRef.current) return;
+        if (desktopLoopbackStreamRef.current) return;
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -291,7 +298,6 @@ export function useAudioPipeline(state: AppState | null) {
           const processor = loopbackCtx.createScriptProcessor(2048, 1, 1);
           source.connect(processor);
 
-          // Route to muted gain node to prevent speaker screech / feedback loop
           const muteGain = loopbackCtx.createGain();
           muteGain.gain.value = 0;
           processor.connect(muteGain);
@@ -300,19 +306,18 @@ export function useAudioPipeline(state: AppState | null) {
           const loopbackResampler = new ContinuousResampler(loopbackCtx.sampleRate, 16000);
 
           processor.onaudioprocess = (e) => {
-            if (!isSessionActive) return;
             const inputData = e.inputBuffer.getChannelData(0);
             const actualSampleRate = e.inputBuffer.sampleRate || loopbackCtx.sampleRate || 48000;
             loopbackResampler.setInputSampleRate(actualSampleRate);
             const pcmChunk = loopbackResampler.process(inputData);
 
-            // Compute RMS for system loopback volume
             let sumSquare = 0;
             for (let i = 0; i < pcmChunk.length; i++) {
               const norm = pcmChunk[i] / 32768;
               sumSquare += norm * norm;
             }
             const rms = Math.min(1, Math.sqrt(sumSquare / (pcmChunk.length || 1)) * 2.8);
+            systemLevelRef.current = rms;
             setSystemLevel(rms);
 
             const vadResult = sysVADRef.current.processChunk(pcmChunk);
@@ -326,154 +331,138 @@ export function useAudioPipeline(state: AppState | null) {
       });
       return unsub;
     }
-  }, [isSessionActive, handleVADResult]);
+  }, [handleVADResult]);
 
-  // Start / Stop Microphone & Audio Analysis
-  const startAudioCapture = useCallback(async () => {
-    try {
-      const micConstraints: MediaTrackConstraints = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        sampleRate: 16000,
-      };
-      if (state?.selectedMicDeviceId) {
-        micConstraints.deviceId = { exact: state.selectedMicDeviceId };
-      }
+  // Always-On Microphone & System Audio Capture (runs continuously, even while answering or when session timer is paused)
+  useEffect(() => {
+    let isDisposed = false;
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: micConstraints,
-        video: false,
-      });
+    const startContinuousAudio = async () => {
+      try {
+        // Ensure main process audiotee system loopback is running
+        window.cluely?.startAudio?.().catch(() => {});
 
-      micStreamRef.current = stream;
-
-      const audioCtx = new (
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-      )();
-      micContextRef.current = audioCtx;
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      // ScriptProcessor for microphone VAD
-      const processor = audioCtx.createScriptProcessor(2048, 1, 1);
-      source.connect(processor);
-
-      // Route to muted gain node to prevent mic audio from looping back to speakers
-      const muteGain = audioCtx.createGain();
-      muteGain.gain.value = 0;
-      processor.connect(muteGain);
-      muteGain.connect(audioCtx.destination);
-
-      const micResampler = new ContinuousResampler(audioCtx.sampleRate, 16000);
-
-      processor.onaudioprocess = (e) => {
-        if (!isSessionActive) return;
-        const inputData = e.inputBuffer.getChannelData(0);
-        const actualSampleRate = e.inputBuffer.sampleRate || audioCtx.sampleRate || 48000;
-        micResampler.setInputSampleRate(actualSampleRate);
-        const pcmChunk = micResampler.process(inputData);
-
-        const vadResult = micVADRef.current.processChunk(pcmChunk);
-        if (vadResult) {
-          handleVADResult(vadResult, 'mic');
+        const micConstraints: MediaTrackConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000,
+        };
+        if (selectedMicDeviceId && selectedMicDeviceId !== 'default') {
+          micConstraints.deviceId = { exact: selectedMicDeviceId };
         }
-      };
 
-      // Equalizer loop for floating HUD wave animation
-      const freqData = new Uint8Array(analyser.frequencyBinCount);
-      const updateEqualizer = () => {
-        if (!micContextRef.current) return;
-        analyser.getByteFrequencyData(freqData);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: micConstraints,
+          video: false,
+        });
 
-        const binCount = freqData.length;
-        const b1 = freqData[Math.floor(binCount * 0.05)] / 255.0;
-        const b2 = freqData[Math.floor(binCount * 0.15)] / 255.0;
-        const b3 = freqData[Math.floor(binCount * 0.3)] / 255.0;
-        const b4 = freqData[Math.floor(binCount * 0.5)] / 255.0;
-        const b5 = freqData[Math.floor(binCount * 0.8)] / 255.0;
+        if (isDisposed) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
 
-        const micAvg = (b1 + b2 + b3 + b4 + b5) / 5.0;
-        setMicLevel(micAvg);
+        micStreamRef.current = stream;
 
-        const sysBoost = Math.min(1.0, (systemLevel || 0) * 1.5);
-        setCombinedBands([
-          Math.max(0.15, Math.min(1.0, b1 * 1.5 + sysBoost * 0.4)),
-          Math.max(0.2, Math.min(1.0, b2 * 1.6 + sysBoost * 0.5)),
-          Math.max(0.25, Math.min(1.0, b3 * 1.7 + sysBoost * 0.6)),
-          Math.max(0.18, Math.min(1.0, b4 * 1.5 + sysBoost * 0.5)),
-          Math.max(0.22, Math.min(1.0, b5 * 1.6 + sysBoost * 0.4)),
-        ]);
+        const audioCtx = new (
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+        )();
+        micContextRef.current = audioCtx;
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+
+        const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+        source.connect(processor);
+
+        const muteGain = audioCtx.createGain();
+        muteGain.gain.value = 0;
+        processor.connect(muteGain);
+        muteGain.connect(audioCtx.destination);
+
+        const micResampler = new ContinuousResampler(audioCtx.sampleRate, 16000);
+
+        processor.onaudioprocess = (e) => {
+          if (isDisposed) return;
+          const inputData = e.inputBuffer.getChannelData(0);
+          const actualSampleRate = e.inputBuffer.sampleRate || audioCtx.sampleRate || 48000;
+          micResampler.setInputSampleRate(actualSampleRate);
+          const pcmChunk = micResampler.process(inputData);
+
+          const vadResult = micVADRef.current.processChunk(pcmChunk);
+          if (vadResult) {
+            handleVADResult(vadResult, 'mic');
+          }
+        };
+
+        const freqData = new Uint8Array(analyser.frequencyBinCount);
+        const updateEqualizer = () => {
+          if (isDisposed || !micContextRef.current) return;
+          analyser.getByteFrequencyData(freqData);
+
+          const binCount = freqData.length;
+          const b1 = freqData[Math.floor(binCount * 0.05)] / 255.0;
+          const b2 = freqData[Math.floor(binCount * 0.15)] / 255.0;
+          const b3 = freqData[Math.floor(binCount * 0.3)] / 255.0;
+          const b4 = freqData[Math.floor(binCount * 0.5)] / 255.0;
+          const b5 = freqData[Math.floor(binCount * 0.8)] / 255.0;
+
+          const micAvg = (b1 + b2 + b3 + b4 + b5) / 5.0;
+          setMicLevel(micAvg);
+
+          const sysBoost = Math.min(1.0, (systemLevelRef.current || 0) * 1.5);
+          setCombinedBands([
+            Math.max(0.15, Math.min(1.0, b1 * 1.5 + sysBoost * 0.4)),
+            Math.max(0.2, Math.min(1.0, b2 * 1.6 + sysBoost * 0.5)),
+            Math.max(0.25, Math.min(1.0, b3 * 1.7 + sysBoost * 0.6)),
+            Math.max(0.18, Math.min(1.0, b4 * 1.5 + sysBoost * 0.5)),
+            Math.max(0.22, Math.min(1.0, b5 * 1.6 + sysBoost * 0.4)),
+          ]);
+
+          animationFrameRef.current = requestAnimationFrame(updateEqualizer);
+        };
 
         animationFrameRef.current = requestAnimationFrame(updateEqualizer);
-      };
+      } catch (err) {
+        console.error('[useAudioPipeline] Failed to start continuous microphone capture:', err);
+      }
+    };
 
-      animationFrameRef.current = requestAnimationFrame(updateEqualizer);
-    } catch (err) {
-      console.error('[useAudioPipeline] Failed to start microphone audio capture:', err);
-    }
-  }, [isSessionActive, handleVADResult]);
-
-  const stopAudioCapture = useCallback(() => {
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
-
-    if (desktopLoopbackStreamRef.current) {
-      desktopLoopbackStreamRef.current.getTracks().forEach((t) => t.stop());
-      desktopLoopbackStreamRef.current = null;
-    }
-
-    if (desktopLoopbackContextRef.current) {
-      desktopLoopbackContextRef.current.close().catch(() => {});
-      desktopLoopbackContextRef.current = null;
-    }
-
-    if (micContextRef.current) {
-      micContextRef.current.close().catch(() => {});
-      micContextRef.current = null;
-    }
-
-    micVADRef.current.reset();
-    sysVADRef.current.reset();
-
-    setMicLevel(0);
-    setSystemLevel(0);
-    setCombinedBands([0.15, 0.25, 0.35, 0.2, 0.3]);
-  }, []);
-
-  useEffect(() => {
-    if (isSessionActive) {
-      startAudioCapture();
-    } else {
-      stopAudioCapture();
-    }
+    startContinuousAudio();
 
     return () => {
-      stopAudioCapture();
+      isDisposed = true;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+      }
+      if (micContextRef.current) {
+        micContextRef.current.close().catch(() => {});
+        micContextRef.current = null;
+      }
     };
-  }, [isSessionActive, startAudioCapture, stopAudioCapture]);
+  }, [selectedMicDeviceId, handleVADResult]);
 
   const clearTranscript = useCallback(() => {
+    latestSegmentsRef.current = [];
     setSegments([]);
     diarizerRef.current.reset();
   }, []);
 
   const renameSpeaker = useCallback((speakerId: string, newName: string) => {
     diarizerRef.current.renameSpeaker(speakerId, newName);
-    setSegments((prev) =>
-      prev.map((s) => (s.speakerId === speakerId ? { ...s, speakerLabel: newName } : s))
-    );
+    setSegments((prev) => {
+      const next = prev.map((s) => (s.speakerId === speakerId ? { ...s, speakerLabel: newName } : s));
+      latestSegmentsRef.current = next;
+      return next;
+    });
   }, []);
 
   const enrollMyVoice = useCallback(
@@ -523,7 +512,7 @@ export function useAudioPipeline(state: AppState | null) {
         const profile = enrollUserVoice(merged);
 
         if (window.cluely && window.cluely.patchState) {
-          const currentProfiles = voiceProfiles.filter((p) => !p.isSelf);
+          const currentProfiles = configRef.current.voiceProfiles.filter((p) => !p.isSelf);
           await window.cluely.patchState({
             voiceProfiles: [profile, ...currentProfiles],
           });
@@ -535,7 +524,7 @@ export function useAudioPipeline(state: AppState | null) {
         return false;
       }
     },
-    [voiceProfiles]
+    []
   );
 
   return {

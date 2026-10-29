@@ -60,7 +60,6 @@ const OverlayApp: React.FC = () => {
 
   const currentStreamIdRef = useRef<string | null>(null);
 
-  // Sync state.transcripts when loaded from store
   useEffect(() => {
     if (state?.transcripts && state.transcripts.length > 0) {
       setTranscripts((prev) => {
@@ -70,7 +69,6 @@ const OverlayApp: React.FC = () => {
     }
   }, [state?.transcripts]);
 
-  // Sync transcripts from IPC
   useEffect(() => {
     if (window.cluely && window.cluely.onTranscriptSegment) {
       const unsub = window.cluely.onTranscriptSegment((segment) => {
@@ -102,7 +100,6 @@ const OverlayApp: React.FC = () => {
     }
   }, []);
 
-  // Listen for newChat shortcut (Cmd+R) to clear active AI response and context
   useEffect(() => {
     if (window.cluely && window.cluely.onShortcut) {
       const unsub = window.cluely.onShortcut('newChat', () => {
@@ -115,7 +112,6 @@ const OverlayApp: React.FC = () => {
     }
   }, []);
 
-  // Listen for real-time AI Stream Chunks (multimodal SSE)
   useEffect(() => {
     if (window.cluely && window.cluely.onAIStreamChunk) {
       const unsub = window.cluely.onAIStreamChunk((chunk) => {
@@ -132,6 +128,10 @@ const OverlayApp: React.FC = () => {
           }
           if (chunk.done) {
             setIsGenerating(false);
+            // Clear the temporary streaming buffer once store.recordAssistEvent has saved it to sessionHistoryEvents
+            setTimeout(() => {
+              setAiResponse('');
+            }, 120);
           }
         }
       });
@@ -142,33 +142,35 @@ const OverlayApp: React.FC = () => {
   const handleSubmit = useCallback(
     async (prompt: string, customDisplayLabel?: string, triggerSource?: 'typed' | 'voice') => {
       if (isGenerating) {
-        return; // Guard against duplicate concurrent requests
+        return;
       }
-      const resolvedTrigger: 'typed' | 'voice' = triggerSource || (prompt.trim() ? 'typed' : 'voice');
+      const resolvedTrigger: 'typed' | 'voice' =
+        triggerSource || (prompt.trim() ? 'typed' : 'voice');
       const isVoiceAssist = resolvedTrigger === 'voice';
-
-      // FIX 1 & STEP 2: Force-flush pending VAD speech from mic & system audio
-      // and await in-flight ASR segment transcriptions BEFORE requesting AI stream!
-      if (isVoiceAssist) {
-        try {
-          if (flushAndWaitForTranscription) {
-            await flushAndWaitForTranscription();
-          } else if (flushPendingSpeech) {
-            await flushPendingSpeech();
-          }
-        } catch (flushErr) {
-          console.warn('[OverlayApp] flush speech error, continuing:', flushErr);
-        }
-      }
 
       const displayLabel = customDisplayLabel || (isVoiceAssist ? 'Assist' : prompt.trim());
       const effectivePrompt = isVoiceAssist ? '' : prompt.trim();
 
-      setInputValue(''); // Clear immediately so it never lingers
+      setInputValue('');
       setLatestUserPrompt(displayLabel);
       setAiResponse('');
       setUsedMemories([]);
       setIsGenerating(true);
+
+      // Force-flush both Mic & System VAD buffers and capture the freshly returned segments directly!
+      let freshSegments: TranscriptSegment[] = segments.length > 0 ? segments : transcripts;
+      try {
+        if (flushAndWaitForTranscription) {
+          const flushed = await flushAndWaitForTranscription();
+          if (flushed && flushed.length > 0) {
+            freshSegments = flushed;
+          }
+        } else if (flushPendingSpeech) {
+          await flushPendingSpeech();
+        }
+      } catch (flushErr) {
+        console.warn('[OverlayApp] flush speech warning, continuing:', flushErr);
+      }
 
       const latestScreenshot = attachedScreenshots[0]?.dataUrl || null;
       const reqId = `stream_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -176,12 +178,11 @@ const OverlayApp: React.FC = () => {
 
       try {
         if (window.cluely && window.cluely.askAIStream) {
-          const activeTranscripts = segments.length > 0 ? segments : transcripts;
           await window.cluely.askAIStream({
             requestId: reqId,
             prompt: effectivePrompt,
             imageDataUrl: latestScreenshot,
-            transcript: activeTranscripts,
+            transcript: freshSegments,
             modeId: state?.activeModeId,
             triggerSource: resolvedTrigger,
           });
@@ -194,7 +195,15 @@ const OverlayApp: React.FC = () => {
         setInputValue('');
       }
     },
-    [attachedScreenshots, segments, transcripts, state?.activeModeId, flushPendingSpeech]
+    [
+      isGenerating,
+      attachedScreenshots,
+      segments,
+      transcripts,
+      state?.activeModeId,
+      flushPendingSpeech,
+      flushAndWaitForTranscription,
+    ]
   );
 
   const handleCancelStream = useCallback(() => {

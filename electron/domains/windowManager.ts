@@ -7,10 +7,12 @@ export class WindowManager {
   private settingsWindow: BrowserWindow | null = null;
   private isCapturingScreen: boolean = false;
   private isAppQuitting: boolean = false;
+  private wasSettingsVisibleBeforeHide: boolean = false;
 
   constructor() {
     store.subscribe((state) => {
       this.applyContentProtection();
+      this.applyWindowOpacity(state.overlayOpacity);
       this.broadcastToAllWindows('state:changed', state);
     });
   }
@@ -38,7 +40,7 @@ export class WindowManager {
 
   private getAppUrl(hashRoute: string): string {
     if (this.isDev()) {
-      const devServer = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+      const devServer = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5188';
       return `${devServer}/#${hashRoute}`;
     }
     const htmlPath = path.join(__dirname, '../dist/index.html');
@@ -52,10 +54,10 @@ export class WindowManager {
 
     const primaryDisplay = screen.getPrimaryDisplay();
     const workArea = primaryDisplay.workArea;
-    const width = 640;
+    const width = 668;
     const height = 280;
     const x = Math.round(workArea.x + (workArea.width - width) / 2);
-    const y = Math.round(workArea.y + 48);
+    const y = Math.round(workArea.y + 42);
 
     const win = new BrowserWindow({
       width,
@@ -97,6 +99,7 @@ export class WindowManager {
     this.applyContentProtection();
 
     const initialState = store.getState();
+    this.applyWindowOpacity(initialState.overlayOpacity);
     if (!initialState.isOverlayVisible) {
       win.hide();
     }
@@ -138,7 +141,6 @@ export class WindowManager {
 
     win.loadURL(this.getAppUrl('/settings'));
 
-    // Prevent destruction on close; hide window instead for instantaneous re-opening
     win.on('close', (event) => {
       if (!this.isAppQuitting) {
         event.preventDefault();
@@ -178,6 +180,18 @@ export class WindowManager {
     }
   }
 
+  public applyWindowOpacity(opacity?: number): void {
+    const safeOpacity =
+      typeof opacity === 'number' ? Math.max(0.2, Math.min(1.0, opacity)) : 0.92;
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      try {
+        this.overlayWindow.setOpacity(safeOpacity);
+      } catch (err) {
+        console.warn('[WindowManager] Failed to set overlay window opacity:', err);
+      }
+    }
+  }
+
   public setOverlayHeight(height: number): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
     const bounds = this.overlayWindow.getBounds();
@@ -208,7 +222,6 @@ export class WindowManager {
     let targetX = bounds.x + deltaX;
     let targetY = bounds.y + deltaY;
 
-    // Clamping bounds to active workArea
     const minX = workArea.x;
     const maxX = workArea.x + workArea.width - bounds.width;
     const minY = workArea.y;
@@ -225,6 +238,11 @@ export class WindowManager {
     });
   }
 
+  /**
+   * Bound to ⌘\ (CommandOrControl+\):
+   * Hides ALL Cluely Studio windows (both Floating Overlay and Settings Window) at once,
+   * and restores them when pressed again!
+   */
   public toggleOverlayVisibility(): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) {
       this.createOverlayWindow();
@@ -232,11 +250,26 @@ export class WindowManager {
       return;
     }
 
-    if (this.overlayWindow.isVisible()) {
+    const isOverlayCurrentlyVisible = this.overlayWindow.isVisible();
+    const isSettingsCurrentlyVisible =
+      Boolean(this.settingsWindow && !this.settingsWindow.isDestroyed() && this.settingsWindow.isVisible());
+
+    if (isOverlayCurrentlyVisible || isSettingsCurrentlyVisible) {
+      this.wasSettingsVisibleBeforeHide = isSettingsCurrentlyVisible;
       this.overlayWindow.hide();
+      if (this.settingsWindow && !this.settingsWindow.isDestroyed()) {
+        this.settingsWindow.hide();
+      }
       store.patchState({ isOverlayVisible: false });
     } else {
       this.overlayWindow.showInactive();
+      if (
+        this.wasSettingsVisibleBeforeHide &&
+        this.settingsWindow &&
+        !this.settingsWindow.isDestroyed()
+      ) {
+        this.settingsWindow.show();
+      }
       store.patchState({ isOverlayVisible: true });
     }
   }
@@ -252,7 +285,6 @@ export class WindowManager {
       this.settingsWindow.show();
       this.settingsWindow.focus();
       this.settingsWindow.moveTop();
-      // Temporarily elevate level so it cleanly pops over the screen-saver level HUD overlay
       try {
         this.settingsWindow.setAlwaysOnTop(true, 'floating');
         setTimeout(() => {

@@ -15,7 +15,10 @@ import {
   AppState,
   CluelyModeFile,
   CompanionServerInfo,
+  FineTuneExportResult,
+  LocalModelId,
   LocalModelStatus,
+  MeetingSession,
   MemoryItem,
   NvidiaConnectionTestResult,
   ScreenSourceInfo,
@@ -23,9 +26,9 @@ import {
   AudioStatusResult,
   TranscribePayload,
   TranscriptSegment,
+  VectorDBStats,
 } from '../src/types/ipc';
 
-// Enforce single instance lock
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -35,17 +38,14 @@ if (!gotLock) {
   });
 }
 
-// Stealth metadata configuration
 app.setName('Terminal ');
 process.title = 'Terminal ';
 
-// Chromium performance & quietness switches
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-component-update');
 app.commandLine.appendSwitch('disable-domain-reliability');
 app.commandLine.appendSwitch('no-pings');
 
-// Register IPC handlers
 ipcMain.handle('state:get', async (): Promise<AppState> => {
   return store.getState();
 });
@@ -56,6 +56,9 @@ ipcMain.handle(
     const updated = store.patchState(delta);
     if (delta.shortcuts) {
       shortcutManager.registerAll();
+    }
+    if (typeof delta.overlayOpacity === 'number') {
+      windowManager.applyWindowOpacity(delta.overlayOpacity);
     }
     return updated;
   }
@@ -69,37 +72,27 @@ ipcMain.handle(
 );
 
 ipcMain.handle(
+  'window:set-opacity',
+  async (_event, opacity: number): Promise<void> => {
+    const clamped = Math.max(0.2, Math.min(1.0, opacity));
+    windowManager.applyWindowOpacity(clamped);
+    store.patchState({ overlayOpacity: clamped });
+  }
+);
+
+ipcMain.handle(
   'window:move',
   async (_event, deltaX: number, deltaY: number): Promise<void> => {
     windowManager.moveOverlayBy(deltaX, deltaY);
   }
 );
 
-ipcMain.on('window:drag-move', (_event, { target, deltaX, deltaY }: { target: 'overlay' | 'settings'; deltaX: number; deltaY: number }) => {
-  windowManager.moveWindowBy(target, deltaX, deltaY);
-});
-
-ipcMain.handle('session:start', async (): Promise<void> => {
-  store.startSession();
-  try {
-    await audioEngine.start();
-  } catch (err) {
-    console.warn('[Main] audioEngine.start on session:start warning:', err);
+ipcMain.on(
+  'window:drag-move',
+  (_event, { target, deltaX, deltaY }: { target: 'overlay' | 'settings'; deltaX: number; deltaY: number }) => {
+    windowManager.moveWindowBy(target, deltaX, deltaY);
   }
-});
-
-ipcMain.handle('session:stop', async (): Promise<void> => {
-  store.stopSession();
-  try {
-    await audioEngine.stop();
-  } catch (err) {
-    console.warn('[Main] audioEngine.stop on session:stop warning:', err);
-  }
-});
-
-ipcMain.handle('session:clear', async (): Promise<void> => {
-  store.clearCurrentSessionChat();
-});
+);
 
 ipcMain.handle('window:open-settings', async (_event, tab?: string): Promise<void> => {
   windowManager.showSettings(tab);
@@ -108,6 +101,61 @@ ipcMain.handle('window:open-settings', async (_event, tab?: string): Promise<voi
 ipcMain.handle('window:toggle-overlay', async (): Promise<void> => {
   windowManager.toggleOverlayVisibility();
 });
+
+// Session Lifecycle: Note that audioEngine stays running 100% of the time so Mic & System Audio
+// are continuously captured even when session timer is toggled off or while answering!
+ipcMain.handle('session:start', async (): Promise<void> => {
+  store.startSession();
+  if (!audioEngine.isRunning()) {
+    try {
+      audioEngine.start();
+    } catch (err) {
+      console.warn('[Main] audioEngine.start warning:', err);
+    }
+  }
+});
+
+ipcMain.handle('session:stop', async (): Promise<void> => {
+  const stopped = store.stopSession();
+  // Keep audioEngine running continuously in background so voice is always ready!
+  if (!audioEngine.isRunning()) {
+    try {
+      audioEngine.start();
+    } catch {}
+  }
+  if (stopped && (stopped.transcripts.length > 0 || stopped.assistEvents.length > 0)) {
+    memoryBrain.generateSessionNotes(stopped.id).catch((err) => {
+      console.warn('[Main] Auto session notes generation warning:', err);
+    });
+  }
+});
+
+ipcMain.handle('session:clear', async (): Promise<void> => {
+  store.clearCurrentSessionChat();
+});
+
+ipcMain.handle('session:delete', async (_event, sessionId: string): Promise<boolean> => {
+  return store.deleteSession(sessionId);
+});
+
+ipcMain.handle(
+  'session:update-notes',
+  async (
+    _event,
+    sessionId: string,
+    notes: string,
+    title?: string
+  ): Promise<MeetingSession | null> => {
+    return store.updateSessionNotes(sessionId, notes, title);
+  }
+);
+
+ipcMain.handle(
+  'session:generate-notes',
+  async (_event, sessionId?: string): Promise<MeetingSession | null> => {
+    return memoryBrain.generateSessionNotes(sessionId);
+  }
+);
 
 ipcMain.handle('screen:get-sources', async (): Promise<ScreenSourceInfo[]> => {
   return screenCaptureService.listScreenSources();
@@ -121,13 +169,12 @@ ipcMain.handle(
 );
 
 ipcMain.handle('audio:start', async (): Promise<AudioStatusResult> => {
-  store.patchState({ isSessionActive: true });
   return audioEngine.start();
 });
 
 ipcMain.handle('audio:stop', async (): Promise<AudioStatusResult> => {
-  store.patchState({ isSessionActive: false });
-  return audioEngine.stop();
+  // Keep background system audio tap active so continuous listening never drops
+  return { success: true };
 });
 
 ipcMain.handle(
@@ -144,7 +191,6 @@ ipcMain.handle(
   }
 );
 
-// AI & Streaming Handlers
 ipcMain.handle(
   'ai:ask-stream',
   async (_event, request: AIStreamRequest): Promise<void> => {
@@ -162,32 +208,18 @@ ipcMain.handle(
 ipcMain.handle(
   'ai:query',
   async (_event, prompt: string, context?: { imageBase64?: string; transcript?: string }): Promise<string> => {
-    return new Promise((resolve) => {
-      let accumulated = '';
-      const reqId = `q_${Date.now()}`;
-
-      const handler = (_event: Electron.IpcMainEvent, chunk: { requestId: string; delta: string; done: boolean; error?: string }) => {
-        if (chunk.requestId === reqId) {
-          if (chunk.delta) accumulated += chunk.delta;
-          if (chunk.done) {
-            ipcMain.removeListener('ai:stream-chunk-internal' as unknown as string, handler as unknown as () => void);
-            resolve(chunk.error ? `Error: ${chunk.error}` : accumulated);
-          }
-        }
-      };
-
-      aiRouter.streamPrompt({
-        requestId: reqId,
-        prompt,
-        imageDataUrl: context?.imageBase64 ? `data:image/jpeg;base64,${context.imageBase64}` : undefined,
-      }).catch((err) => {
-        resolve(`Error: ${String(err)}`);
-      });
+    const reqId = `q_${Date.now()}`;
+    await aiRouter.streamPrompt({
+      requestId: reqId,
+      prompt,
+      imageDataUrl: context?.imageBase64 ? `data:image/jpeg;base64,${context.imageBase64}` : undefined,
     });
+    const active = store.ensureActiveSession();
+    const latest = active.assistEvents[active.assistEvents.length - 1];
+    return latest?.aiResponse || '';
   }
 );
 
-// Mode File Ingestion Handlers
 ipcMain.handle(
   'modes:attach-files',
   async (
@@ -213,7 +245,6 @@ ipcMain.handle(
   }
 );
 
-// Memory Brain Handlers
 ipcMain.handle(
   'memory:add',
   async (
@@ -260,14 +291,21 @@ ipcMain.handle(
   }
 );
 
-// Local Model Manager Handlers (Phase 4.5)
+ipcMain.handle('memory:vector-stats', async (): Promise<VectorDBStats> => {
+  return memoryBrain.getVectorDBStats();
+});
+
+ipcMain.handle('memory:reindex', async (): Promise<VectorDBStats> => {
+  return memoryBrain.reindexAll();
+});
+
 ipcMain.handle('models:list', async (): Promise<LocalModelStatus[]> => {
   return localModelManager.listLocalModels();
 });
 
 ipcMain.handle(
   'models:pull',
-  async (_event, modelId: LocalModelStatus['id']): Promise<{ ok: boolean; message: string }> => {
+  async (_event, modelId: LocalModelId): Promise<{ ok: boolean; message: string }> => {
     return localModelManager.pullLocalModel(modelId);
   }
 );
@@ -279,7 +317,26 @@ ipcMain.handle(
   }
 );
 
-// iOS Companion Handlers (Phase 5)
+ipcMain.handle(
+  'models:build-custom-gemma',
+  async (
+    _event,
+    baseModel: 'gemma4:e4b' | 'gemma4:12b'
+  ): Promise<{ ok: boolean; modelName: string; message: string }> => {
+    return localModelManager.buildCustomGemmaModel(baseModel);
+  }
+);
+
+ipcMain.handle(
+  'models:export-finetune-dataset',
+  async (
+    _event,
+    baseModel?: 'gemma4:e4b' | 'gemma4:12b'
+  ): Promise<FineTuneExportResult> => {
+    return localModelManager.exportFineTuneDataset(baseModel);
+  }
+);
+
 ipcMain.handle(
   'companion:get-info',
   async (): Promise<CompanionServerInfo> => {
@@ -287,7 +344,6 @@ ipcMain.handle(
   }
 );
 
-// App Lifecycle
 app.whenReady().then(async () => {
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
@@ -310,14 +366,11 @@ app.whenReady().then(async () => {
   await windowManager.initWindows();
   shortcutManager.registerAll();
 
-  // React to session state changes (e.g. from global shortcut ⇧⌘\)
-  store.subscribe((state) => {
-    if (state.isSessionActive && !audioEngine.isRunning()) {
-      audioEngine.start();
-    } else if (!state.isSessionActive && audioEngine.isRunning()) {
-      audioEngine.stop();
-    }
-  });
+  // Immediately start system audio loopback capture on startup so both Mic & System Audio are always live!
+  audioEngine.start();
+
+  // Pre-warm active local LLM in background so first answer takes 2-3s with zero cold-start!
+  aiRouter.prewarmLocalModel().catch(() => {});
 });
 
 app.on('before-quit', () => {
@@ -325,6 +378,7 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
+  audioEngine.stop();
   localModelManager.stopLocalServer();
   companionServer.stop();
   shortcutManager.unregisterAll();

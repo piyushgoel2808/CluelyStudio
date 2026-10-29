@@ -1,6 +1,6 @@
 /**
  * Cluely Studio - Canonical Data & IPC Contract
- * Phase 1, 2, 3 & 4: Shared TypeScript Definitions
+ * Unified TypeScript Definitions for Stealth HUD, Continuous Audio Pipeline, Vector DB & Fast Local Gemma 4 AI
  */
 
 export type ShortcutAction =
@@ -16,12 +16,21 @@ export type ShortcutAction =
   | 'scrollUp'
   | 'scrollDown';
 
+export interface DocumentChunk {
+  id: string;
+  fileId: string;
+  fileName: string;
+  text: string;
+  embedding?: number[];
+}
+
 export interface CluelyModeFile {
   id: string;
   name: string;
   path: string;
   size: number;
   extractedText: string;
+  chunks?: DocumentChunk[];
   addedAt: number;
 }
 
@@ -46,9 +55,9 @@ export interface TranscriptSegment {
   startTimeMs: number;
   endTimeMs: number;
   durationMs?: number;
-  formattedTimestamp?: string; // e.g., "[00:16.64 - 00:28.16]"
-  speakerColor?: string;       // "#22c55e" (Speaker-0/Me), "#38bdf8" (Speaker-1), "#a3a3a3" (Speaker-2), "#f43f5e" (Speaker-3)
-  isPartial?: boolean;        // true during Nemotron live streaming, false once finalized by Parakeet-TDT
+  formattedTimestamp?: string;
+  speakerColor?: string;
+  isPartial?: boolean;
 }
 
 export interface MemoryItem {
@@ -59,6 +68,17 @@ export interface MemoryItem {
   tags: string[];
   createdAt: number;
   sourceMeetingId?: string;
+  embedding?: number[];
+  similarityScore?: number;
+}
+
+export interface VectorDBStats {
+  totalMemories: number;
+  indexedVectors: number;
+  totalModeChunks: number;
+  embeddingModel: string;
+  dimensions: number;
+  engineStatus: 'ollama-dense' | 'local-hybrid-384d';
 }
 
 export interface SpeakerVoiceProfile {
@@ -73,23 +93,24 @@ export interface SpeakerVoiceProfile {
 export type NvidiaLatencyProfile = 'ultra-low' | 'balanced' | 'high-accuracy';
 
 export interface NvidiaSpeechConfig {
-  nimApiKey: string;                    // NVIDIA Developer NIM API Key (nvapi-...)
-  nimEndpointUrl: string;               // Default: 'https://integrate.api.nvidia.com/v1/audio/transcriptions'
-  localParakeetUrl: string;             // Default: 'http://127.0.0.1:50051/v1/audio/transcriptions'
-  parakeetModelId: string;              // Default: 'nvidia/parakeet-tdt-0.6b-v2'
-  nemotronModelId: string;              // Default: 'nvidia/nemotron-speech-streaming-en-0.6b'
-  enableMultiTalker: boolean;           // Default: true (Zero-shot 4-speaker stream separation)
-  handleCrossTalk: boolean;             // Default: true (Parallel stream per voice on overlapping speech)
-  latencyProfile: NvidiaLatencyProfile; // Default: 'balanced' ('ultra-low'=380ms, 'balanced'=650ms, 'high-accuracy'=1050ms)
+  nimApiKey: string;
+  nimEndpointUrl: string;
+  localParakeetUrl: string;
+  parakeetModelId: string;
+  nemotronModelId: string;
+  enableMultiTalker: boolean;
+  handleCrossTalk: boolean;
+  latencyProfile: NvidiaLatencyProfile;
 }
 
 export interface AIProviderConfig {
-  activeProvider: 'gemini' | 'openai' | 'anthropic' | 'groq' | 'ollama';
+  activeProvider: 'ollama' | 'gemini' | 'openai' | 'anthropic' | 'groq';
   activeModel: string;
+  embeddingModel?: string;
   voiceProvider:
-    | 'nvidia-hybrid'
     | 'nvidia-parakeet-tdt'
     | 'whisper-base-onnx'
+    | 'nvidia-hybrid'
     | 'nvidia-nemotron-nim'
     | 'gemini-native'
     | 'groq-whisper'
@@ -126,11 +147,15 @@ export interface MeetingSession {
   transcripts: TranscriptSegment[];
   assistEvents: SessionAssistEvent[];
   summary?: string;
+  notes?: string;
+  actionItems?: string[];
+  keyDecisions?: string[];
   status: 'active' | 'completed';
 }
 
 export interface AppState {
   undetectability: boolean;
+  overlayOpacity: number;
   launchAtLogin: boolean;
   transcriptionLanguage: string;
   outputLanguage: string;
@@ -141,7 +166,7 @@ export interface AppState {
   selectedScreenSourceId: string | null;
   isOverlayVisible: boolean;
   overlayExpanded: boolean;
-  overlayDrawerView: 'none' | 'response' | 'history' | 'transcript' | 'live-screen';
+  overlayDrawerView: 'none' | 'response' | 'history' | 'transcript' | 'live-screen' | 'notes';
   activeModeId: string;
   modes: CluelyMode[];
   shortcuts: Record<ShortcutAction, string>;
@@ -217,16 +242,22 @@ export interface NvidiaConnectionTestResult {
   message: string;
 }
 
+export type LocalModelId =
+  | 'gemma4-e4b-ollama'
+  | 'gemma4-12b-ollama'
+  | 'gemma2-embed-ollama'
+  | 'nvidia-nemotron-ollama'
+  | 'ollama-vision'
+  | 'nvidia-parakeet-tdt-onnx'
+  | 'whisper-base-onnx'
+  | 'speaker-diarization-onnx';
+
 export interface LocalModelStatus {
-  id:
-    | 'nvidia-nemotron-ollama'
-    | 'nvidia-parakeet-tdt-onnx'
-    | 'whisper-base-onnx'
-    | 'speaker-diarization-onnx'
-    | 'ollama-vision';
+  id: LocalModelId;
   name: string;
   provider: 'ollama' | 'onnx-local';
   modelTag: string;
+  role: 'llm-multimodal' | 'embedding' | 'asr' | 'diarization';
   installed: boolean;
   running: boolean;
   downloading: boolean;
@@ -234,6 +265,15 @@ export interface LocalModelStatus {
   sizeLabel: string;
   statusMessage: string;
   error?: string;
+}
+
+export interface FineTuneExportResult {
+  ok: boolean;
+  datasetPath: string;
+  modelfilePath: string;
+  scriptPath: string;
+  sampleCount: number;
+  message: string;
 }
 
 export interface CompanionServerInfo {
@@ -246,13 +286,12 @@ export interface CompanionServerInfo {
 }
 
 export interface CluelyAPI {
-  // State synchronization
   getState: () => Promise<AppState>;
   patchState: (delta: Partial<AppState>) => Promise<AppState>;
   onStateChange: (callback: (state: AppState) => void) => () => void;
 
-  // Window control
   setOverlayHeight: (height: number) => Promise<void>;
+  setOverlayOpacity?: (opacity: number) => Promise<void>;
   moveWindow: (deltaX: number, deltaY: number) => Promise<void>;
   dragWindowMove?: (target: 'overlay' | 'settings', deltaX: number, deltaY: number) => void;
   openSettings: (tab?: string) => Promise<void>;
@@ -261,20 +300,19 @@ export interface CluelyAPI {
   setUndetectability: (val: boolean) => Promise<void>;
   saveAIConfig: (config: AIProviderConfig) => Promise<void>;
 
-  // Session lifecycle control
   startSession?: () => Promise<void>;
   stopSession?: () => Promise<void>;
   clearSessionChat?: () => Promise<void>;
+  deleteSession?: (sessionId: string) => Promise<boolean>;
+  updateSessionNotes?: (sessionId: string, notes: string, title?: string) => Promise<MeetingSession | null>;
+  generateSessionNotes?: (sessionId?: string) => Promise<MeetingSession | null>;
 
-  // Shortcuts
   onShortcut: (action: ShortcutAction, callback: () => void) => () => void;
   onShortcutScroll: (callback: (direction: 'up' | 'down') => void) => () => void;
 
-  // Screen capture & sources (Phase 2)
   captureScreen: (sourceId?: string) => Promise<ScreenCaptureResult | null>;
   getScreenSources: () => Promise<ScreenSourceInfo[]>;
 
-  // Audio stream & sidecars (Phase 3)
   startAudio: () => Promise<AudioStatusResult>;
   stopAudio: () => Promise<AudioStatusResult>;
   onAudioData: (callback: (data: { role: 'me' | 'them'; chunk: string }) => void) => () => void;
@@ -284,36 +322,34 @@ export interface CluelyAPI {
   onSystemPcmChunk: (callback: (data: { pcmBase64: string; rms: number }) => void) => () => void;
   onUseDesktopAudioFallback: (callback: () => void) => () => void;
 
-  // Stage 1-3 NVIDIA Speech (Phase 4)
   testNvidiaConnection: () => Promise<NvidiaConnectionTestResult>;
 
-  // AI & Streaming (Phase 4)
   queryAI: (prompt: string, context?: { imageBase64?: string; transcript?: string }) => Promise<string>;
   askAIStream: (request: AIStreamRequest) => Promise<void>;
   cancelAIStream: (requestId: string) => Promise<void>;
   onAIStreamChunk: (callback: (chunk: AIStreamChunk) => void) => () => void;
   onAIChunk: (callback: (chunk: string) => void) => () => void;
 
-  // Modes File RAG Engine (Phase 4)
   attachModeFiles: (modeId: string, files: Array<{ name: string; path?: string; base64Data?: string }>) => Promise<CluelyModeFile[]>;
   removeModeFile: (modeId: string, fileId: string) => Promise<boolean>;
   pickModeFiles: (modeId: string) => Promise<CluelyModeFile[]>;
 
-  // Personal Memory Brain (Phase 4)
   addMemory: (memory: Omit<MemoryItem, 'id' | 'createdAt'>) => Promise<MemoryItem>;
   updateMemory: (id: string, updates: Partial<MemoryItem>) => Promise<MemoryItem | null>;
   deleteMemory: (id: string) => Promise<boolean>;
   getMemories: () => Promise<MemoryItem[]>;
   searchMemories: (query: string) => Promise<MemoryItem[]>;
   extractMemoriesFromTranscript: (segments: TranscriptSegment[]) => Promise<MemoryItem[]>;
+  getVectorDBStats?: () => Promise<VectorDBStats>;
+  reindexVectorDB?: () => Promise<VectorDBStats>;
 
-  // Local Open-Source NVIDIA & Ollama Models (Phase 4.5)
   listLocalModels: () => Promise<LocalModelStatus[]>;
-  pullLocalModel: (modelId: LocalModelStatus['id']) => Promise<{ ok: boolean; message: string }>;
+  pullLocalModel: (modelId: LocalModelId) => Promise<{ ok: boolean; message: string }>;
   startLocalNvidiaServer: () => Promise<{ ok: boolean; port: number; message: string }>;
   onModelProgress: (cb: (status: LocalModelStatus) => void) => () => void;
+  buildCustomGemmaModel?: (baseModel: 'gemma4:e4b' | 'gemma4:12b') => Promise<{ ok: boolean; modelName: string; message: string }>;
+  exportFineTuneDataset?: (baseModel?: 'gemma4:e4b' | 'gemma4:12b') => Promise<FineTuneExportResult>;
 
-  // iOS Companion & Pocket Microphone (Phase 5)
   getCompanionInfo: () => Promise<CompanionServerInfo>;
 }
 

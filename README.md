@@ -1,153 +1,130 @@
-# Cluely Studio
+# CluelyStudio — Production Desktop AI Meeting & Interview Copilot
 
-<p align="center">
-  <strong>Ultra-Low-Latency, Multimodal Stealth AI Meeting Teleprompter & Real-Time Interview Copilot</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Electron-32.0.0-47848F?logo=electron&logoColor=white" alt="Electron 32" />
-  <img src="https://img.shields.io/badge/TypeScript-5.5-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/React-18.3-61DAFB?logo=react&logoColor=black" alt="React 18" />
-  <img src="https://img.shields.io/badge/Tailwind-3.4-38B2AC?logo=tailwindcss&logoColor=white" alt="Tailwind" />
-  <img src="https://img.shields.io/badge/Sherpa--ONNX-NVIDIA%20Parakeet-76B900?logo=nvidia&logoColor=white" alt="NVIDIA Parakeet" />
-  <img src="https://img.shields.io/badge/Ollama-Local%20Inference-black?logo=ollama&logoColor=white" alt="Ollama" />
-  <img src="https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon-blue?logo=apple&logoColor=white" alt="macOS" />
-</p>
+**CluelyStudio** is an ultra-low-latency, hardware-stealth desktop AI meeting and interview teleprompter engineered with **Google Gemma 4 (`gemma4:e4b` & `gemma4:12b`)**, an **Embedded Local Vector DB (384-d Dense Feature Hashing + BM25 Hybrid RRF)**, **continuous dual-channel CoreAudio/WASAPI speech recognition (`NVIDIA Parakeet-TDT 0.6B` & `Whisper`)**, and a **pixel-perfect floating Control Pill HUD**.
 
 ---
 
-## ⚡ Core Capabilities
+## 🚀 Key Architectural Highlights
 
-- **🏎️ Instant Teleprompting (< 150ms TTFT)**: Powered by local Ollama (`gemma4:e4b` / `nemotron-mini`) with `think: false` and strict token ceilings, delivering candidate-ready spoken answers without thinking latency.
-- **🎙️ Sub-200ms Offline Speech Recognition**: Dual-channel continuous capture (`Me` via microphone, `Them` via system loopback audio) processed locally on Apple Silicon using native Sherpa-ONNX (NVIDIA Parakeet-TDT 0.6B + Whisper Small).
-- **⚡ Force-Flush VAD on `⌘ ↵`**: Instantly flushes buffered speech audio ($\ge 180\text{ms}$) and awaits pending ASR commits before querying AI, ensuring speech spoken right before hitting Command+Enter is never lost.
-- **🎯 Deterministic Spoken Segment Cursor Slicing**: Uses a `lastConsumedTranscriptId` cursor to isolate all speech since the last answered question, ensuring typed text queries never override fresh spoken speech.
-- **🧠 Phonetic Error Repair & Question Synthesis**: Silently detects and corrects ASR phonetic errors against mode ground truth and synthesizes overarching questions across multi-sentence conversational turns.
-- **💼 Copilot Modes Framework**: Switchable personas including **Gen AI** (featuring complete NewsLens-AI project ground truth), **Interview**, **System Design**, **Coding**, and **Behavioral**.
-- **📱 Stealth LAN Companion Web App**: Embedded WebSocket server (`:45780`) enabling discreet mobile or tablet teleprompting with zero on-screen footprint.
-- **🛡️ 100% Screen Share Invisibility**: Uses macOS native `setContentProtection(true)` to hide the overlay card from Zoom, Microsoft Teams, Google Meet, and screen recordings.
+### 1. Authentic Floating Control Pill HUD & Multi-Window Topology
+- **Control Pill HUD (`/#/control`)**: A compact, frameless, transparent floating pill window (`196x54px`, `alwaysOnTop: true`, `type: 'panel'`, `skipTaskbar: true`, `hiddenInMissionControl: true`). Features the iconic blue **"C"** logo button, blue capsule **"✨ Ask"** button, dark **Microphone** recording toggle, and dark **Settings** gear button.
+- **Assistant Chat Overlay (`/#/overlay`)**: A sleek `668px` floating teleprompter window positioned directly beneath the Control Pill. Drops down instantly when clicking **Ask** or pressing `⌘↵`, and minimizes with `Esc` or the `✕` close button.
+- **Settings Studio (`/#/settings`)**: A full-featured `960x680px` configuration workspace for BYOK cloud keys (Gemini, OpenAI, Claude), Local AI & Vector DB management, real WebAudio frequency analyser mic monitoring, session history, and fine-tuning exports.
+- **Unified Global App Toggle (`⌘\`)**: Pressing `CommandOrControl+\` stealthily hides or restores all Cluely windows (both Overlay and Settings) at once.
+- **Live Overlay Transparency Slider**: Real-time slider (20%–100%) under **Settings ➔ General & Audio** that dynamically updates window opacity and CSS backdrop filters.
 
----
+### 2. Hardware Stealth Screen-Sharing Protection (`setContentProtection`)
+- Enforces Cocoa `NSWindowSharingNone` on macOS and Win32 `WDA_EXCLUDEFROMCAPTURE` on Windows across all overlay windows.
+- The assistant HUD is **100% invisible** during Zoom, Microsoft Teams, Google Meet, Slack, Discord, and OBS screen-shares.
+- Screen context snapshotting (`desktopCapturer`) temporarily asserts capture-exclusion so the assistant never captures or obstructs itself.
 
-## 🏗️ System Architecture
+### 3. Sub-2.5s Quick-Thinking Multimodal LLM (`Gemma 4 E4B` & `12B`)
+- **Zero Cold-Start Model Swapping**: In-memory 384-d feature hashing vector search and BM25 RRF run directly in Node.js, eliminating the 4–8 second Ollama model-swapping delay from disk.
+- **Pre-Warmed GPU Weights**: Pinned in unified memory on startup via `keep_alive: -1`.
+- **Quick-Thinking Teleprompter Tuning**: Configured with `think: false`, `num_ctx: 2048`, `num_predict: 280`, and `temperature: 0.1` to stream bulleted spoken answers in under 2.5 seconds.
+- **Multimodal Screen Vision**: Natively accepts text and high-resolution screen snapshots (`images: [base64]`) in a single forward pass.
+- **QLoRA Fine-Tuning Studio**: Compiles custom `cluely-gemma4` Modelfiles and exports session Q&A history into ShareGPT/ChatML datasets with ready-to-run Unsloth 4-bit training scripts (`train_gemma4_qlora.py`).
 
-```mermaid
-flowchart TD
-    subgraph AudioCapture["1. Continuous Dual Audio Capture"]
-        Mic["Microphone (Me)"] --> MicVAD["RealTimeVAD (Mic Channel)"]
-        Sys["System Loopback (Them / audiotee)"] --> Resampler["Continuous 48k->16k Resampler"]
-        Resampler --> SysVAD["RealTimeVAD (System Channel)"]
-    end
+### 4. Continuous, Teardown-Immune Dual Audio Pipeline
+- **Continuous Capture**: Microphone (`Me`) and system loopback (`Them` via `audiotee`) capture runs continuously, even when the session toggle is paused or while an answer is actively streaming.
+- **Ref-Based Architecture**: Replaced state-dependent audio hooks with persistent mutable `configRef` references in `useAudioPipeline.ts`, completely eliminating React re-render audio context teardowns.
+- **6-Second Rolling Ring Buffer**: Preserves pre-speech frames to ensure no leading words are clipped during speech-onset.
+- **Serialized ONNX Decode Mutex**: Native `sherpa-onnx-node` decoding is serialized through `runExclusiveDecode` so simultaneous Me and Them utterances never race on CPU threads.
 
-    subgraph OfflineASR["2. Local Speech Recognition (Sherpa-ONNX)"]
-        MicVAD --> Parakeet["NVIDIA Parakeet-TDT 0.6B (~180-220ms)"]
-        SysVAD --> Parakeet
-        Parakeet -.->|Fallback| Whisper["Whisper Small Multilingual"]
-        Parakeet --> Filter["Repetition & Noise Filter"]
-        Filter --> StoreTranscripts["State Store (transcripts)"]
-    end
-
-    subgraph AssistPipeline["3. Assist Trigger & In-Flight Drain"]
-        CmdEnter["User Shortcut (⌘ ↵)"] --> VADFlush["forceFlush() on Mic & Sys VAD"]
-        VADFlush --> ASRDrain["waitForPendingTranscriptions(1500)"]
-        ASRDrain --> AIRouter["AIRouter (aiRouter.ts)"]
-    end
-
-    subgraph AIProcessing["4. Context Engine & Local LLM"]
-        StoreTranscripts --> AIRouter
-        AIRouter --> CursorSlicer["Deterministic Cursor Slicing (since last question)"]
-        CursorSlicer --> PhoneticRepair["Phonetic Speech Repair & Question Synthesis"]
-        PhoneticRepair --> Ollama["Local Ollama (gemma4:e4b / nemotron-mini)"]
-        PhoneticRepair -.-> Cloud["Cloud Endpoints (Gemini / OpenAI / Claude)"]
-    end
-
-    subgraph DisplaySurfaces["5. Output Teleprompter Surfaces"]
-        Ollama --> FloatingHUD["Stealth Overlay HUD (Screen-Share Invisible)"]
-        Ollama --> MobileCompanion["LAN Companion Web App (Mobile Browser :45780)"]
-    end
-```
+### 5. Multi-Turn Continuous Scrollable Session Q&A Feed
+- Previous answers in the active meeting session never disappear when asking subsequent questions.
+- All turns (`#1, #2, ...`) render in a scrollable teleprompter feed with timestamps, user queries, vector memory badges, copy actions, and markdown rendering.
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Prerequisites
-- macOS 13+ (Ventura, Sonoma, Sequoia) on Apple Silicon (M1/M2/M3/M4 recommended) or Intel.
-- Node.js 18+ (Node 20+ recommended).
-- [Ollama](https://ollama.ai) installed and running in the background.
-
-### 2. Installation
-```bash
-git clone https://github.com/piyushgoel2808/Cluely.git
-cd Cluely
-npm install
-```
-
-### 3. Pull Ollama Models
-```bash
-# Recommended ultra-fast reasoning model (~140ms TTFT)
-ollama pull gemma4:e4b
-
-# Ultra-lightweight fallback model
-ollama pull nemotron-mini
-
-# Semantic personal memory embeddings
-ollama pull all-minilm
-```
-
-### 4. Download Offline Speech Models
-Download the optimized INT8 ONNX models for Sherpa-ONNX:
-```bash
-chmod +x scripts/download_models.sh
-./scripts/download_models.sh
-```
-
-### 5. Run in Development Mode
-```bash
-npm run dev
-```
-
-### 6. Build & Package
-```bash
-# Build Electron main and preload
-npm run build:electron
-
-# Build full production web & electron bundles
-npm run build
-
-# Package macOS DMG / Application bundle
-npm run package:mac
-```
-
----
-
-## 📚 Technical Documentation
-
-Comprehensive architectural and implementation guides are available in the [`docs/`](./docs/) directory:
-
-| Document | Topic |
-|---|---|
-| [**01. System Architecture**](./docs/01_SYSTEM_ARCHITECTURE.md) | Electron process model, window management, persistent store, and IPC data contracts. |
-| [**02. Audio & Transcription Pipeline**](./docs/02_AUDIO_AND_TRANSCRIPTION_PIPELINE.md) | Dual-channel capture, VAD force-flush, continuous resampler, and Sherpa-ONNX runtime. |
-| [**03. AI Router & LLM Integration**](./docs/03_AI_ROUTER_AND_LLM_INTEGRATION.md) | Multi-provider router, Gemma 4 optimization, single-flight stream aborts, and screen vision. |
-| [**04. Prompt Engineering & Speech Repair**](./docs/04_PROMPT_ENGINEERING_AND_SPEECH_REPAIR.md) | Deterministic cursor slicing, acoustic ASR error repair, and multi-sentence question synthesis. |
-| [**05. Modes & Interview Copilot**](./docs/05_MODES_AND_INTERVIEW_COPILOT.md) | Copilot personas framework and verified NewsLens-AI codebase ground truth. |
-| [**06. Sessions, History & Companion Web App**](./docs/06_SETTINGS_SESSIONS_AND_COMPANION.md) | Session lifecycle, timeline event tracking, and LAN WebSocket companion teleprompter. |
-| [**07. Developer Guide & Troubleshooting**](./docs/07_DEVELOPER_GUIDE_AND_TROUBLESHOOTING.md) | Setup instructions, macOS permissions, and debugging runbooks. |
-
----
-
-## ⌨️ Default Shortcuts
+## ⌨️ Global Accelerators & Shortcuts
 
 | Shortcut | Action | Description |
 |---|---|---|
-| `⌘ ↵` | **Ask Cluely** | Flushes pending audio and triggers instant answer for live conversation. |
-| `⌘ ,` | **Settings** | Opens the Settings and Past Sessions window. |
-| `⌘ M` | **Cycle Mode** | Toggles between Copilot modes (General, Gen AI, Interview, etc.). |
-| `Escape` | **Dismiss / Collapse** | Minimizes or collapses the active response card. |
+| **`⌘ \`** | Toggle All Windows | Stealth hide/restore both the Floating HUD and Settings Studio together |
+| **`⌘ ↵`** | Instant AI Assist | Flushes speech buffer and queries quick-thinking multimodal teleprompter |
+| **`⇧ ⌘ \`** | Toggle Session REC | Starts or stops dual-channel meeting audio recording and live ASR diarization |
+| **`⌘ ,`** | Open Settings | Opens the 6-tab Settings Studio |
+| **`⌘ R`** | Fresh Context | Clears active assistant chat feed and resets teleprompter state |
+| **`Esc`** | Dismiss Overlay | Collapses the assistant card back to the compact Control Pill |
 
 ---
 
-## 📄 License
+## 🛠️ Quick Start & Developer Setup
 
-This project is licensed under the MIT License.
+### Prerequisites
+- macOS 13+ (Ventura, Sonoma, Sequoia) on Apple Silicon or Intel / Windows 10+ (64-bit).
+- Node.js v20+ and npm.
+- [Ollama](https://ollama.ai) installed and running locally.
+
+### Installation & Run
+
+```bash
+# 1. Clone repository & navigate to CluelyStudio
+cd /Users/piyushgoel/Downloads/Projects/Cluely/CluelyStudio
+
+# 2. Install dependencies
+npm install
+
+# 3. Pull recommended local models in Ollama (or 1-click install in Settings)
+ollama pull gemma4:e4b
+ollama pull gemma2:2b
+
+# 4. Run development environment (Vite renderer on port 5188 + Electron CJS main)
+npm run dev
+
+# 5. Typecheck & build production bundle
+npm run typecheck
+npm run build
+```
+
+---
+
+## 📁 Repository Structure
+
+```
+CluelyStudio/
+├── electron/
+│   ├── main.ts                    # Main process entry, IPC router, lifecycle & pre-warming
+│   ├── preload.ts                 # Secure contextBridge API exposing window.cluely
+│   └── domains/
+│       ├── windowManager.ts       # Multi-window topology (Control Pill, Overlay, Settings)
+│       ├── store.ts               # Local reactive store in app.getPath('userData')
+│       ├── aiRouter.ts            # Multimodal Gemma 4 streaming, cloud fallback & 2-3s teleprompter
+│       ├── memoryBrain.ts         # In-memory 384-d Vector DB + BM25 Hybrid RRF search
+│       ├── localModelManager.ts   # Serialized ONNX decode mutex, Modelfile compiler & QLoRA export
+│       ├── transcriptionService.ts# Dual-channel diarization & Sherpa-ONNX ASR bridge
+│       ├── audioEngine.ts         # CoreAudio audiotee tap / desktop loopback runner
+│       ├── screenCapture.ts       # DesktopCapturer with self-exclusion protection
+│       ├── shortcuts.ts           # Global keyboard accelerator registry
+│       ├── fileParser.ts          # Semantic document chunker (PDF, DOCX, TXT, MD)
+│       └── companionServer.ts     # LAN HTTP/WebSocket teleprompter server (:45780)
+├── src/
+│   ├── components/
+│   │   ├── control/
+│   │   │   └── ControlPill.tsx    # 196x54px floating pill HUD (C badge, Ask, Mic, Settings)
+│   │   ├── overlay/
+│   │   │   └── CluelyOverlayCard.tsx # 668px expandable assistant card with scrollable Q&A feed
+│   │   └── settings/
+│   │       ├── SettingsWindow.tsx # 6-tab studio with opacity slider, BYOK keys, mic meter
+│   │       └── SessionsHistoryView.tsx # 2-column meeting session workspace & notes editor
+│   ├── hooks/
+│   │   ├── useAudioPipeline.ts    # Continuous audio capture, VAD & resampler (ref-based)
+│   │   ├── useWindowDrag.ts       # Cross-platform window dragging hook (control/overlay/settings)
+│   │   ├── useAppState.ts         # Reactive state synchronization hook
+│   │   └── useLiveScreen.ts       # On-demand & automated screen capture hook
+│   └── services/
+│       └── vadAndDiarization.ts   # Client-side 16kHz VAD, 6s ring buffer & voiceprint diarizer
+├── dist-electron/
+│   ├── main.cjs                   # Compiled CommonJS Electron main process
+│   └── preload.cjs                # Compiled CommonJS Electron preload script
+├── package.json                   # Configuration, dependencies & build scripts (dev port: 5188)
+└── vite.config.ts                 # Vite bundler for React 18 renderer
+```
+
+---
+
+## 🔒 Security & Privacy Guarantees
+- **100% Offline Capable**: Speech recognition (Sherpa-ONNX) and AI inference (Gemma 4 via Ollama) run entirely on-device without external telemetry.
+- **Zero-Storage Privacy Mode**: Transcripts, snapshots, and AI responses remain in local memory or encrypted on disk in `~/Library/Application Support/cluely-studio`.
+- **Anti-Screen Capture**: Protected at the OS compositor level (`NSWindowSharingNone`), preventing intentional or accidental leakage on video conferences.

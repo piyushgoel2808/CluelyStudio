@@ -3,9 +3,10 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { dialog } from 'electron';
 import { store } from './store';
+import { memoryBrain } from './memoryBrain';
 import { CluelyModeFile } from '../../src/types/ipc';
 
-const MAX_EXTRACTED_CHARS = 40000;
+const MAX_EXTRACTED_CHARS = 45000;
 
 export class FileParser {
   /**
@@ -22,11 +23,9 @@ export class FileParser {
     } else if (ext === '.pdf') {
       rawText = this.extractFromPdf(buffer);
     } else {
-      // Plain text, markdown, source code, json, csv, etc.
       rawText = buffer.toString('utf-8');
     }
 
-    // Clean whitespace and enforce 40,000 char cap
     const cleaned = rawText
       .replace(/\r\n/g, '\n')
       .replace(/[ \t]+/g, ' ')
@@ -43,17 +42,12 @@ export class FileParser {
     return cleaned;
   }
 
-  /**
-   * Native ZIP & XML parser for Word (.docx) files without third-party native binaries
-   */
   private extractFromDocx(buffer: Buffer): string {
     try {
-      // Find 'word/document.xml' within the zip local file headers
       let offset = 0;
       const len = buffer.length;
 
       while (offset < len - 30) {
-        // Look for local file header signature: 0x04034b50 (PK\x03\x04)
         if (
           buffer[offset] === 0x50 &&
           buffer[offset + 1] === 0x4b &&
@@ -81,7 +75,6 @@ export class FileParser {
             }
 
             if (xmlContent) {
-              // Extract text inside <w:t>...</w:t> tags
               const matches = xmlContent.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g);
               if (matches) {
                 return matches
@@ -103,15 +96,11 @@ export class FileParser {
     return '';
   }
 
-  /**
-   * PDF Text extractor using Flate stream decompression and PDF text operators
-   */
   private extractFromPdf(buffer: Buffer): string {
     const textPieces: string[] = [];
     const bufString = buffer.toString('binary');
 
     try {
-      // Find all stream / endstream segments
       const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
       let match: RegExpExecArray | null;
 
@@ -131,8 +120,6 @@ export class FileParser {
 
         if (decompressed) {
           const str = decompressed.toString('latin1');
-
-          // Extract text from (text) Tj
           const tjMatches = str.match(/\((.*?)\)\s*Tj/g);
           if (tjMatches) {
             for (const item of tjMatches) {
@@ -141,7 +128,6 @@ export class FileParser {
             }
           }
 
-          // Extract text from [(t1)(t2)] TJ
           const bigTjMatches = str.match(/\[(.*?)\]\s*TJ/g);
           if (bigTjMatches) {
             for (const item of bigTjMatches) {
@@ -163,13 +149,12 @@ export class FileParser {
       return textPieces.join(' ');
     }
 
-    // Fallback: search for readable ASCII sequences in the buffer
     const asciiMatches = bufString.match(/[A-Za-z0-9\s.,!?:;\-_'"()]{6,}/g);
     return asciiMatches ? asciiMatches.slice(0, 500).join(' ') : '';
   }
 
   /**
-   * Attach files to a specific Cluely mode and persist in store
+   * Attach files to a specific Cluely mode, chunk & embed them into Vector DB, and persist
    */
   public async attachFilesToMode(
     modeId: string,
@@ -197,12 +182,16 @@ export class FileParser {
         extractedText = await this.extractText(file.name, buffer);
       }
 
+      const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const chunks = memoryBrain.chunkDocumentText(fileId, file.name, extractedText);
+
       const modeFile: CluelyModeFile = {
-        id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        id: fileId,
         name: file.name,
         path: file.path || '',
         size: fileSize,
         extractedText,
+        chunks,
         addedAt: Date.now(),
       };
 
@@ -223,9 +212,6 @@ export class FileParser {
     return createdModeFiles;
   }
 
-  /**
-   * Remove a file from a mode
-   */
   public async removeFileFromMode(modeId: string, fileId: string): Promise<boolean> {
     const state = store.getState();
     const mode = state.modes.find((m) => m.id === modeId);
@@ -245,12 +231,9 @@ export class FileParser {
     return true;
   }
 
-  /**
-   * Show native file picker dialog and attach chosen files to mode
-   */
   public async pickFilesDialog(modeId: string): Promise<CluelyModeFile[]> {
     const result = await dialog.showOpenDialog({
-      title: 'Select Knowledge Files for Mode',
+      title: 'Select Knowledge Files for Mode Vector RAG',
       properties: ['openFile', 'multiSelections'],
       filters: [
         {

@@ -6,11 +6,15 @@ import {
   CluelyAPI,
   CluelyModeFile,
   CompanionServerInfo,
+  FineTuneExportResult,
+  LocalModelId,
   LocalModelStatus,
+  MeetingSession,
   MemoryItem,
   NvidiaConnectionTestResult,
   ShortcutAction,
   TranscriptSegment,
+  VectorDBStats,
 } from '../src/types/ipc';
 
 const api: CluelyAPI = {
@@ -30,6 +34,9 @@ const api: CluelyAPI = {
   setOverlayHeight: (height: number) =>
     ipcRenderer.invoke('window:set-overlay-height', height),
 
+  setOverlayOpacity: (opacity: number) =>
+    ipcRenderer.invoke('window:set-opacity', opacity),
+
   moveWindow: (deltaX: number, deltaY: number) =>
     ipcRenderer.invoke('window:move', deltaX, deltaY),
 
@@ -40,6 +47,16 @@ const api: CluelyAPI = {
   startSession: () => ipcRenderer.invoke('session:start'),
   stopSession: () => ipcRenderer.invoke('session:stop'),
   clearSessionChat: () => ipcRenderer.invoke('session:clear'),
+  deleteSession: (sessionId: string): Promise<boolean> =>
+    ipcRenderer.invoke('session:delete', sessionId),
+  updateSessionNotes: (
+    sessionId: string,
+    notes: string,
+    title?: string
+  ): Promise<MeetingSession | null> =>
+    ipcRenderer.invoke('session:update-notes', sessionId, notes, title),
+  generateSessionNotes: (sessionId?: string): Promise<MeetingSession | null> =>
+    ipcRenderer.invoke('session:generate-notes', sessionId),
 
   openSettings: (tab?: string) => ipcRenderer.invoke('window:open-settings', tab),
 
@@ -200,12 +217,17 @@ const api: CluelyAPI = {
   ): Promise<MemoryItem[]> =>
     ipcRenderer.invoke('memory:extract-from-transcript', segments),
 
-  // Local Open-Source NVIDIA & Ollama Models (Phase 4.5)
+  getVectorDBStats: (): Promise<VectorDBStats> =>
+    ipcRenderer.invoke('memory:vector-stats'),
+
+  reindexVectorDB: (): Promise<VectorDBStats> =>
+    ipcRenderer.invoke('memory:reindex'),
+
   listLocalModels: (): Promise<LocalModelStatus[]> =>
     ipcRenderer.invoke('models:list'),
 
   pullLocalModel: (
-    modelId: LocalModelStatus['id']
+    modelId: LocalModelId
   ): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke('models:pull', modelId),
 
@@ -220,7 +242,16 @@ const api: CluelyAPI = {
     };
   },
 
-  // iOS Companion & Pocket Microphone (Phase 5)
+  buildCustomGemmaModel: (
+    baseModel: 'gemma4:e4b' | 'gemma4:12b'
+  ): Promise<{ ok: boolean; modelName: string; message: string }> =>
+    ipcRenderer.invoke('models:build-custom-gemma', baseModel),
+
+  exportFineTuneDataset: (
+    baseModel?: 'gemma4:e4b' | 'gemma4:12b'
+  ): Promise<FineTuneExportResult> =>
+    ipcRenderer.invoke('models:export-finetune-dataset', baseModel),
+
   getCompanionInfo: (): Promise<CompanionServerInfo> =>
     ipcRenderer.invoke('companion:get-info'),
 };

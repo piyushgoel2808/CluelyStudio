@@ -39,7 +39,8 @@ export const DEFAULT_NVIDIA_SPEECH_CONFIG: NvidiaSpeechConfig = {
 
 export const DEFAULT_AI_CONFIG: AIProviderConfig = {
   activeProvider: 'ollama',
-  activeModel: 'nemotron-mini',
+  activeModel: 'gemma4:e4b',
+  embeddingModel: 'gemma2:2b',
   voiceProvider: 'nvidia-parakeet-tdt',
   apiKeys: {
     gemini: '',
@@ -52,95 +53,61 @@ export const DEFAULT_AI_CONFIG: AIProviderConfig = {
   nvidiaSpeech: DEFAULT_NVIDIA_SPEECH_CONFIG,
 };
 
+const LEGACY_MOCK_SESSION_IDS = new Set([
+  'sess_1',
+  'sess_2',
+  'sess_3',
+  'sess_4',
+  'sess_5',
+  'sess_6',
+  'sess_7',
+]);
+
 export const DEFAULT_MODES: CluelyMode[] = [
   {
     id: 'general',
-    name: 'General',
+    name: 'General Copilot',
     category: 'general',
     icon: 'compass',
     contextPrompt:
-      'You are Cluely, a high-intelligence, concise copilot. Provide direct, actionable, accurate answers. Keep responses well-structured and brief.',
+      'You are Cluely, a real-time meeting and desktop copilot. Provide direct, factual, well-structured answers grounded strictly in the live conversation, screen context, attached documents, and personal memory vault. Never invent facts, project names, or credentials.',
     files: [],
   },
   {
     id: 'interview',
-    name: 'Interview',
+    name: 'Technical & Role Interview',
     category: 'work',
     icon: 'briefcase',
-    contextPrompt: `I am a candidate in a job interview. Help me perform well across behavioral, technical, product, role-fit, and follow-up questions.
+    contextPrompt: `I am a candidate in a live interview. Help me deliver clear, confident, first-person answers across technical, architectural, product, and follow-up questions.
 
-Use the job description, resume, notes, and any attached files as ground truth when available. Do not fabricate experience, credentials, companies, numbers, or project details. If context is missing, give me an answer structure that I can quickly fill in.
-
-For behavioral questions, help me choose a strong example and shape it with situation, task, action, and result. For technical or role-specific questions, explain the concept clearly, state tradeoffs, and answer at the right depth for an interview.
-
-When the interviewer asks something vague, infer what they are evaluating and give me a direct answer that addresses that signal. Keep answers confident but not arrogant, polished but not robotic.
-
-If I get stuck, help me recover: ask a clarifying question, state a reasonable assumption, think aloud, and move toward a useful answer. Also suggest thoughtful questions I can ask about the role, team, success criteria, product, and company.
-
-Make responses concise enough to say out loud in the moment unless I explicitly ask for a deeper explanation.`,
+STRICT GROUNDING RULES:
+1. Rely strictly on attached files (resume, portfolio, codebase docs), Personal Memory Vault, and the current session transcript.
+2. NEVER fabricate project names, company names, metrics, or file paths that are not present in my attached files or memories.
+3. Structure technical answers with: (a) Direct 1-sentence core answer, (b) Key architectural mechanism & trade-offs, and (c) Concrete real-world impact or complexity.
+4. Keep sentences natural and concise so I can speak them aloud effortlessly.`,
     files: [],
   },
   {
     id: 'gen-ai',
-    name: 'Gen AI',
+    name: 'AI & LLM Engineering',
     category: 'work',
     icon: 'sparkles',
-    contextPrompt: `I am in a Gen AI interview. Answer every question authoritatively as the lead engineer and architect of NewsLens-AI.
+    contextPrompt: `I am in an AI / ML / LLM Systems Engineering interview or technical review. Answer from a first-person principal AI engineer perspective.
 
-PROJECT OVERVIEW (NewsLens-AI):
-NewsLens-AI is an enterprise-grade Broadsheet Intelligence & Agentic RAG Platform that transforms scanned multi-column newspaper archives into structured, searchable intelligence with 2D spatial bounding box citations and cross-publication story trajectories.
-
-EXACT CODEBASE FILE PATHS & RESPONSIBILITIES:
-- Dual-Mode Neural Layout Parsing & OCR:
-  * backend/app/ingestion/parsers/docling.py: IBM Docling with DocLayNet for 2D spatial layout segmentation. Supports local containerized Docling or IBM Cloud Docling SaaS API.
-  * backend/app/ingestion/layout/segmenter.py: 2D spatial column sorting, multi-line headline coalescing, and inline byline extraction ('BY <NAME>') without column bleeding.
-  * backend/app/ingestion/parsers/vlm.py: Qwen3-VL (qwen3-vl:latest) multimodal extraction isolating editorial photos, paired multi-column captions, and infographic data tables.
-- Dual Collection Vector Storage & Database:
-  * backend/app/storage/qdrant.py: Qdrant dual-collection architecture routing 768d Matryoshka MRL embeddings (gemini-embedding-001) to 'article_chunks_v2' and 1024d embeddings (BAAI/bge-m3) to 'article_chunks'.
-  * backend/app/storage/mysql.py: MySQL 8 system of record with 17 normalized tables and FULLTEXT index for lexical matching.
-  * backend/app/storage/minio.py: S3-compatible MinIO object storage storing 300 DPI page scans and cropped visual assets.
-  * backend/app/storage/redis.py: Redis 7 caching narrative trajectories and distributed locks.
-- Two-Stage Hybrid Retrieval & Reranking:
-  * backend/app/retrieval/hybrid.py: Stage 1 Reciprocal Rank Fusion (RRF) combining Qdrant dense vector search with MySQL FULLTEXT sparse retrieval (candidates N=75).
-  * backend/app/retrieval/reranker.py: Stage 2 Cross-Encoder neural reranking (cross-encoder/ms-marco-MiniLM-L-6-v2) with adaptive candidate pool capping (K=8..16) and macOS CPU optimization.
-  * backend/app/retrieval/web.py: Multi-tier live internet search cascading across NewsData.io, Serper, and Tavily.
-- Autonomous Agentic Reasoning (LangGraph & CRAG):
-  * backend/app/agent/planner.py: Autonomous LangGraph dynamic query planner with Chain-of-Thought grounded in live schema metadata.
-  * backend/app/agent/graph.py: LangGraph state machine with adaptive replanning and recovery nodes.
-  * backend/app/agent/evaluator.py: Corrective RAG (CRAG) reflexive evaluator scoring retrieval confidence and diagnosing gaps.
-  * backend/app/agent/tool_maker.py & backend/app/agent/sandbox.py: Dynamic Python/SQL tool synthesis audited by ToolCritic (5 dimensions: SASC, SRF, REH, DSF, RPS) executed in an isolated AST subprocess sandbox.
-  * backend/app/agent/synthesizer.py: Compiles AnswerBlueprint into structured, citation-grounded editorial briefings.
-- Evaluation, Hallucination Mitigations & Contamination:
-  * backend/app/evaluation/metrics.py: Computes Recall@K, Precision@K, MRR, NDCG@K, Faithfulness, Citation Precision/Recall, and Multi-Newspaper Coverage F1.
-  * backend/tests/test_cross_date_contamination.py: Strict anti-leakage suite preventing cross-turn date and publication context contamination.
-  * backend/app/api/query.py: extract_active_issue_from_history() enforcing strict temporal filtering to prevent cutoff hallucinations on previous dates.
-- Frontend Interactive Canvas:
-  * frontend-v2/src/App.tsx & frontend/src/components/ModelSettingsStudio.jsx: React 18 + Vite SPA with 300 DPI scan reader, spatial bounding box pulse overlays, visual asset inspector, and hot-swappable model studio.
-
-WHEN ANSWERING IN INTERVIEWS:
-1. Always state the exact relative file path from the codebase when asked where a component lives.
-2. Explain the architectural trade-offs: why dual Qdrant collections (MRL 768d vs 1024d), why two-stage RRF + Cross-Encoder reranking (sub-second latency vs full reranking), why IBM Docling + Qwen-VL (table understanding + multi-column broadsheet reading order).
-3. If asked to perform something or solve a problem, give concrete step-by-step instructions.
-4. When code is requested, provide clean, idiomatic Python or React/TypeScript code with meaningful variable names.
-5. Keep answers short, sharp, and easy to speak out loud in an interview.`,
-    files: [],
-  },
-  {
-    id: 'behavioral-interview',
-    name: 'Behavioral Interview',
-    category: 'work',
-    icon: 'user-check',
-    contextPrompt:
-      'I am in a behavioral interview. Help me answer questions in a confident, natural way that sounds like a real person speaking, not a scripted essay.\n\nUse the STAR structure when it helps: situation, task, action, result. Keep the answer focused on one specific story, make the action I personally took very clear, and tie the result back to the competency the interviewer is testing.\n\nIf my resume, job description, notes, or other files are attached, use them as the source of truth for my background. Do not invent credentials, employers, metrics, or projects that are not supported by context. If a detail is missing, give me a safe framework to fill in.',
+KEY FOCUS AREAS:
+1. RAG & Vector Databases: Hybrid retrieval (dense embeddings + BM25 lexical search + Reciprocal Rank Fusion), cross-encoder reranking, chunking strategies, and context window optimization.
+2. Local & Edge LLM Inference: Quantization (INT4/INT8/GGUF/AWQ), KV-cache management, speculative decoding, and multimodal vision-language pipelines (Gemma 4 e4b / 12b, Llama, Qwen-VL).
+3. Fine-Tuning & Alignment: LoRA / QLoRA adapters, DPO/RLHF, synthetic dataset curation, and evaluation benchmarks (Faithfulness, Recall@K, NDCG).
+4. Ground answers strictly in my attached project files and memory vault—never hallucinate unverified project names or paths.`,
     files: [],
   },
   {
     id: 'coding-interview',
-    name: 'Coding Interview',
+    name: 'Coding & Algorithms',
     category: 'work',
     icon: 'code',
     contextPrompt:
-      'I am in a technical coding interview. Analyze any problem description, code editor, or terminal visible on my screen or discussed in audio. Provide: 1) A 2-sentence intuition of the optimal approach, 2) Exact Time & Space Complexity, 3) Clean, bug-free production code in the language shown on screen, and 4) Edge cases to mention aloud.',
+      'I am in a live coding interview. Inspect the problem statement, IDE code, or terminal on my screen or spoken in audio. Provide: 1) A 2-sentence intuition of the optimal algorithm, 2) Exact Time & Space Complexity (Big-O), 3) Clean, bug-free production code in the active language, and 4) Key edge cases to mention aloud.',
     files: [],
   },
   {
@@ -149,182 +116,47 @@ WHEN ANSWERING IN INTERVIEWS:
     category: 'work',
     icon: 'layers',
     contextPrompt:
-      'When the interviewer asks a broad question, identify the underlying signal first, such as ownership, conflict, ambiguity, leadership, failure, learning, collaboration, or impact. Then suggest a concise answer that directly addresses that signal.\n\nWhen I need a follow-up, help me ask thoughtful questions about expectations, team culture, success criteria, growth, and the role. Keep responses interview-ready, concise, and easy to say out loud.',
+      'I am in a distributed systems design interview. Guide me through: 1) Functional & non-functional requirements (latency, throughput, availability), 2) Back-of-the-envelope capacity estimation, 3) API & data model schema, 4) High-level architecture (load balancing, caching, sharding, queues), and 5) Bottlenecks & failure recovery trade-offs.',
     files: [],
   },
   {
-    id: 'case-interview',
-    name: 'Case Interview',
+    id: 'behavioral-interview',
+    name: 'Behavioral (STAR)',
     category: 'work',
-    icon: 'trending-up',
+    icon: 'user-check',
     contextPrompt:
-      'I am in a management consulting or business case interview. Help me break down ambiguous business problems into MECE (Mutually Exclusive, Collectively Exhaustive) frameworks. Provide quantitative sanity checks, hypothesis-driven structures, and strategic recommendations.',
-    files: [],
-  },
-  {
-    id: 'recruiter-screen',
-    name: 'Recruiter Screen',
-    category: 'work',
-    icon: 'phone-call',
-    contextPrompt:
-      'I am on an initial recruiter phone screen. Help me articulate my compensation expectations, timeline, visa status, motivation for the role, and high-level background in an enthusiastic, professional, and crisp manner.',
+      'I am in a behavioral or leadership interview. Shape my answers using the STAR framework (Situation, Task, Action, Result) grounded strictly in my attached resume and Personal Memory Vault. Keep the tone conversational, ownership-focused, and easy to speak aloud.',
     files: [],
   },
   {
     id: 'sales',
-    name: 'Sales',
+    name: 'Sales & Discovery',
     category: 'work',
     icon: 'dollar-sign',
     contextPrompt:
-      'I am leading or participating in a customer sales or discovery call. Help me handle objections smoothly, identify buyer pain points, ask high-leverage discovery questions, and present crisp value propositions matching customer needs.',
+      'I am on a customer discovery or enterprise sales call. Help me address objections concisely, surface high-leverage discovery questions, and connect buyer pain points directly to our product capabilities.',
     files: [],
   },
   {
     id: 'team-meet',
-    name: 'Team Meet',
+    name: 'Team Standup & Sync',
     category: 'work',
     icon: 'users',
     contextPrompt:
-      'I am in an internal team meeting or sync. Summarize discussion points, detect action items with owners, suggest constructive talking points, and clarify technical blockers.',
+      'I am in an internal engineering or product sync. Track key decisions, surface action items with owners, clarify technical blockers, and draft crisp talking points.',
     files: [],
   },
-  {
-    id: 'lecture',
-    name: 'Lecture',
-    category: 'other',
-    icon: 'book-open',
-    contextPrompt:
-      'I am attending a technical lecture or presentation. Capture core definitions, break down complex concepts into simple mental models, highlight key takeaways, and note potential follow-up questions.',
-    files: [],
-  },
-  {
-    id: 'recruiting',
-    name: 'Recruiting',
-    category: 'work',
-    icon: 'user-plus',
-    contextPrompt:
-      'I am an interviewer conducting an interview with a candidate. Help me evaluate candidate responses against role competencies, suggest insightful follow-up questions to probe depth, and take structured evaluation notes.',
-    files: [],
-  },
-];
-
-export const DEFAULT_PAST_SESSIONS: MeetingSession[] = [
-  {
-    id: 'sess_1',
-    title: 'Monday Follow-Up Review Call',
-    startTime: new Date('2026-09-19T14:35:00').getTime(),
-    endTime: new Date('2026-09-19T15:55:00').getTime(),
-    durationSeconds: 4800,
-    status: 'completed',
-    transcripts: [
-      { id: 't1', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Let’s walk through the architecture updates from this week.', startTimeMs: 2000, endTimeMs: 5000, timestamp: 1726738502000, formattedTimestamp: '[00:02 - 00:05]', speakerColor: '#22c55e' },
-      { id: 't2', speakerId: 'them', speakerLabel: 'THEM', role: 'them', text: 'Sounds good, specifically how we optimized offline transcription.', startTimeMs: 6000, endTimeMs: 10000, timestamp: 1726738506000, formattedTimestamp: '[00:06 - 00:10]', speakerColor: '#38bdf8' },
-    ],
-    assistEvents: [
-      {
-        id: 'a1',
-        timestamp: new Date('2026-09-19T14:40:00').getTime(),
-        offsetSeconds: 5,
-        formattedOffset: '0:05',
-        userPrompt: 'What should I say?',
-        aiResponse: '“We decoupled the audio capture from transcription using a ring buffer, dropping p95 latency down to 240ms on Apple Silicon.”',
-        modeName: 'Interview',
-      }
-    ],
-    summary: 'Reviewed offline transcription pipeline improvements and latency benchmarks.'
-  },
-  {
-    id: 'sess_2',
-    title: 'News Lens AI Demo',
-    startTime: new Date('2026-09-16T11:02:00').getTime(),
-    endTime: new Date('2026-09-16T11:59:00').getTime(),
-    durationSeconds: 3420,
-    status: 'completed',
-    transcripts: [
-      { id: 't3', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Here is the demonstration of NewsLens AI processing multimodal feeds.', startTimeMs: 2000, endTimeMs: 6000, timestamp: 1726466522000, formattedTimestamp: '[00:02 - 00:06]', speakerColor: '#22c55e' },
-    ],
-    assistEvents: [],
-  },
-  {
-    id: 'sess_3',
-    title: 'Brief Closing Remarks',
-    startTime: new Date('2026-09-16T10:10:00').getTime(),
-    endTime: new Date('2026-09-16T10:26:00').getTime(),
-    durationSeconds: 960,
-    status: 'completed',
-    transcripts: [],
-    assistEvents: [],
-  },
-  {
-    id: 'sess_4',
-    title: 'Untitled session',
-    startTime: new Date('2026-09-15T20:49:00').getTime(),
-    endTime: new Date('2026-09-15T21:11:00').getTime(),
-    durationSeconds: 1320,
-    status: 'completed',
-    transcripts: [],
-    assistEvents: [],
-  },
-  {
-    id: 'sess_5',
-    title: 'Planner and Executor Review',
-    startTime: new Date('2026-09-15T20:23:00').getTime(),
-    endTime: new Date('2026-09-15T20:38:00').getTime(),
-    durationSeconds: 900,
-    status: 'completed',
-    transcripts: [],
-    assistEvents: [],
-  },
-  {
-    id: 'sess_6',
-    title: 'NewsLens Retrieval & Chunking',
-    startTime: new Date('2026-09-15T18:48:00').getTime(),
-    endTime: new Date('2026-09-15T19:04:00').getTime(),
-    durationSeconds: 960,
-    status: 'completed',
-    transcripts: [],
-    assistEvents: [],
-  },
-  {
-    id: 'sess_7',
-    title: 'NewsLens Query Planner Overview',
-    startTime: new Date('2026-09-12T16:46:00').getTime(),
-    endTime: new Date('2026-09-12T19:11:00').getTime(),
-    durationSeconds: 8700,
-    status: 'completed',
-    transcripts: [
-      { id: 'u1', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'I mean, I think it\'s a problem.', startTimeMs: 2000, endTimeMs: 4000, timestamp: 1726142162000, formattedTimestamp: '[00:02 - 00:04]', speakerColor: '#22c55e' },
-      { id: 'u2', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'and you can tell about hallucinations.', startTimeMs: 4000, endTimeMs: 7000, timestamp: 1726142164000, formattedTimestamp: '[00:04 - 00:07]', speakerColor: '#22c55e' },
-      { id: 'u3', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Your project is again and again taking previous dates.', startTimeMs: 7000, endTimeMs: 10500, timestamp: 1726142167000, formattedTimestamp: '[00:07 - 00:10]', speakerColor: '#22c55e' },
-      { id: 'u4', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'So, how will you think you handle it?', startTimeMs: 11000, endTimeMs: 14000, timestamp: 1726142171000, formattedTimestamp: '[00:11 - 00:14]', speakerColor: '#22c55e' },
-      { id: 'u5', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Thank you.', startTimeMs: 15000, endTimeMs: 17000, timestamp: 1726142175000, formattedTimestamp: '[00:15 - 00:17]', speakerColor: '#22c55e' },
-      { id: 'u6', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Thank you.', startTimeMs: 24000, endTimeMs: 26000, timestamp: 1726142184000, formattedTimestamp: '[00:24 - 00:26]', speakerColor: '#22c55e' },
-      { id: 'u7', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Thank you.', startTimeMs: 37000, endTimeMs: 39000, timestamp: 1726142197000, formattedTimestamp: '[00:37 - 00:39]', speakerColor: '#22c55e' },
-      { id: 'u8', speakerId: 'me', speakerLabel: 'ME', role: 'me', text: 'Okay, and what other topics you are taking?', startTimeMs: 40000, endTimeMs: 43500, timestamp: 1726142200000, formattedTimestamp: '[00:40 - 00:43]', speakerColor: '#22c55e' },
-    ],
-    assistEvents: [
-      {
-        id: 'as1',
-        timestamp: new Date('2026-09-12T16:47:00').getTime(),
-        offsetSeconds: 14,
-        formattedOffset: '0:14',
-        userPrompt: 'How will you handle hallucinations and date drifting in NewsLens?',
-        aiResponse: '“We handle date drifting by enforcing temporal metadata filters before hybrid BM25 and vector search, coupled with a cross-encoder reranker to verify factual grounding.”',
-        modeName: 'Gen AI',
-      }
-    ],
-    summary: 'Discussion regarding NewsLens query planning, hallucination mitigation, and temporal retrieval chunking.'
-  }
 ];
 
 export const DEFAULT_STATE: AppState = {
   undetectability: true,
+  overlayOpacity: 0.92,
   launchAtLogin: false,
   transcriptionLanguage: 'English (recommended)',
   outputLanguage: 'English',
   selectedMicDeviceId: 'default',
   meetingEnvironment: 'online',
-  isSessionActive: true, // Default to true so live meeting audio capture and transcription start immediately
+  isSessionActive: true,
   isLiveScreenActive: false,
   selectedScreenSourceId: null,
   isOverlayVisible: true,
@@ -337,7 +169,7 @@ export const DEFAULT_STATE: AppState = {
   personalMemories: [],
   voiceProfiles: [],
   transcripts: [],
-  pastSessions: DEFAULT_PAST_SESSIONS,
+  pastSessions: [],
   currentSessionId: null,
 };
 
@@ -371,22 +203,25 @@ export class DomainStore {
     this.questionCursorTimestamp = ts;
   }
 
-  public startSession(): MeetingSession {
+  public startSession(customTitle?: string): MeetingSession {
     const sessionId = `sess_${Date.now()}`;
     const newSession: MeetingSession = {
       id: sessionId,
-      title: 'Live Meeting Session',
+      title: customTitle || `Meeting Session — ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
       startTime: Date.now(),
       durationSeconds: 0,
       status: 'active',
       transcripts: [],
       assistEvents: [],
+      notes: '',
+      actionItems: [],
+      keyDecisions: [],
     };
     this.activeSessionId = sessionId;
     this.questionCursorTimestamp = Date.now() - 1000;
 
-    const currentPast = Array.isArray(this.state.pastSessions) ? this.state.pastSessions : DEFAULT_PAST_SESSIONS;
-    const sessions = [newSession, ...currentPast];
+    const currentPast = Array.isArray(this.state.pastSessions) ? this.state.pastSessions : [];
+    const sessions = [newSession, ...currentPast.map((s) => (s.status === 'active' ? { ...s, status: 'completed' as const } : s))];
     this.patchState({
       isSessionActive: true,
       currentSessionId: sessionId,
@@ -396,32 +231,75 @@ export class DomainStore {
     return newSession;
   }
 
-  public stopSession(): void {
+  public stopSession(): MeetingSession | null {
     const currentId = this.getActiveSessionId();
-    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const sessions = [...(this.state.pastSessions || [])];
     const activeSession = sessions.find((s) => s.id === currentId);
     if (activeSession) {
       activeSession.status = 'completed';
+      activeSession.endTime = Date.now();
       activeSession.durationSeconds = Math.max(1, Math.round((Date.now() - activeSession.startTime) / 1000));
     }
     this.patchState({
       isSessionActive: false,
       pastSessions: sessions,
     });
+    return activeSession || null;
+  }
+
+  public deleteSession(sessionId: string): boolean {
+    const sessions = (this.state.pastSessions || []).filter((s) => s.id !== sessionId);
+    const nextCurrentId = this.state.currentSessionId === sessionId ? (sessions[0]?.id || null) : this.state.currentSessionId;
+    if (this.activeSessionId === sessionId) {
+      this.activeSessionId = nextCurrentId;
+    }
+    this.patchState({
+      pastSessions: sessions,
+      currentSessionId: nextCurrentId,
+    });
+    return true;
+  }
+
+  public updateSessionNotes(
+    sessionId: string,
+    notes: string,
+    title?: string,
+    summary?: string,
+    actionItems?: string[],
+    keyDecisions?: string[]
+  ): MeetingSession | null {
+    const sessions = [...(this.state.pastSessions || [])];
+    const idx = sessions.findIndex((s) => s.id === sessionId);
+    if (idx === -1) return null;
+
+    const updated: MeetingSession = {
+      ...sessions[idx],
+      notes,
+      ...(title !== undefined ? { title } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+      ...(actionItems !== undefined ? { actionItems } : {}),
+      ...(keyDecisions !== undefined ? { keyDecisions } : {}),
+    };
+    sessions[idx] = updated;
+    this.patchState({ pastSessions: sessions });
+    return updated;
   }
 
   public ensureActiveSession(): MeetingSession {
-    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const sessions = [...(this.state.pastSessions || [])];
     let active = sessions.find((s) => s.id === this.getActiveSessionId());
     if (!active || active.status === 'completed') {
       active = {
         id: `sess_${Date.now()}`,
-        title: 'Live Meeting Session',
+        title: `Meeting Session — ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
         startTime: Date.now(),
         durationSeconds: 0,
         status: 'active',
         transcripts: [],
         assistEvents: [],
+        notes: '',
+        actionItems: [],
+        keyDecisions: [],
       };
       sessions.unshift(active);
       this.activeSessionId = active.id;
@@ -435,7 +313,7 @@ export class DomainStore {
 
   public clearCurrentSessionChat(): void {
     const currentId = this.getActiveSessionId();
-    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    const sessions = [...(this.state.pastSessions || [])];
     const activeSession = sessions.find((s) => s.id === currentId);
     if (activeSession) {
       activeSession.assistEvents = [];
@@ -476,6 +354,7 @@ export class DomainStore {
     const mergedAIConfig: AIProviderConfig = {
       ...DEFAULT_AI_CONFIG,
       ...(loaded.aiConfig || {}),
+      embeddingModel: loaded.aiConfig?.embeddingModel || DEFAULT_AI_CONFIG.embeddingModel,
       apiKeys: {
         ...DEFAULT_AI_CONFIG.apiKeys,
         ...(loaded.aiConfig?.apiKeys || {}),
@@ -483,13 +362,11 @@ export class DomainStore {
       nvidiaSpeech: mergedNvidiaSpeech,
     };
 
-    // Auto-fallback: if user has no Gemini/OpenAI key configured, default to local Ollama
     if (mergedAIConfig.activeProvider === 'gemini' && !mergedAIConfig.apiKeys.gemini) {
       mergedAIConfig.activeProvider = 'ollama';
-      mergedAIConfig.activeModel = 'nemotron-mini';
+      mergedAIConfig.activeModel = 'gemma4:e4b';
     }
 
-    // Auto-fallback: if user has no Cloud NIM key or Gemini key, default to local Parakeet-TDT (100% offline & fast)
     if (
       !mergedAIConfig.voiceProvider ||
       (mergedAIConfig.voiceProvider === 'nvidia-hybrid' && !mergedAIConfig.nvidiaSpeech.nimApiKey) ||
@@ -498,38 +375,48 @@ export class DomainStore {
       mergedAIConfig.voiceProvider = 'nvidia-parakeet-tdt';
     }
 
-    // Ensure all default modes exist
+    // Merge modes and sanitize any legacy hardcoded NewsLens-AI prompt
     const existingModes = Array.isArray(loaded.modes) ? loaded.modes : [];
     const modeMap = new Map<string, CluelyMode>();
     for (const defaultMode of DEFAULT_MODES) {
       modeMap.set(defaultMode.id, defaultMode);
     }
     for (const mode of existingModes) {
-      if (mode.id === 'interview' || mode.id === 'gen-ai') {
-        const def = modeMap.get(mode.id);
+      const def = modeMap.get(mode.id);
+      const hasLegacyHallucination =
+        mode.contextPrompt && mode.contextPrompt.includes('NewsLens-AI');
+      if (def && (!mode.isCustom || hasLegacyHallucination)) {
         modeMap.set(mode.id, {
-          ...mode,
-          name: def?.name || mode.name,
-          contextPrompt: def?.contextPrompt || mode.contextPrompt,
+          ...def,
+          files: Array.isArray(mode.files) ? mode.files : [],
         });
       } else {
         modeMap.set(mode.id, mode);
       }
     }
 
-    // Filter out stale transcripts from previous days to keep current session fresh
+    // Filter out stale transcripts (> 2 hours old) from active overlay buffer
     const now = Date.now();
     const freshTranscripts = (Array.isArray(loaded.transcripts) ? loaded.transcripts : []).filter(
-      (t) => t.timestamp && now - t.timestamp < 15 * 60 * 1000
+      (t) => t.timestamp && now - t.timestamp < 2 * 60 * 60 * 1000
+    );
+
+    // Strip out hardcoded mock sessions (sess_1..sess_7) so only real user sessions remain
+    const realSessions = (Array.isArray(loaded.pastSessions) ? loaded.pastSessions : []).filter(
+      (s) => s && s.id && !LEGACY_MOCK_SESSION_IDS.has(s.id)
     );
 
     return {
       undetectability: loaded.undetectability ?? DEFAULT_STATE.undetectability,
+      overlayOpacity:
+        typeof loaded.overlayOpacity === 'number'
+          ? Math.max(0.2, Math.min(1.0, loaded.overlayOpacity))
+          : DEFAULT_STATE.overlayOpacity,
       launchAtLogin: loaded.launchAtLogin ?? DEFAULT_STATE.launchAtLogin,
       transcriptionLanguage: loaded.transcriptionLanguage ?? DEFAULT_STATE.transcriptionLanguage,
       outputLanguage: loaded.outputLanguage ?? DEFAULT_STATE.outputLanguage,
       selectedMicDeviceId: loaded.selectedMicDeviceId ?? DEFAULT_STATE.selectedMicDeviceId,
-      meetingEnvironment: 'online', // Default to online so mic is accurately labeled Me and system is labeled Them
+      meetingEnvironment: loaded.meetingEnvironment ?? 'online',
       isSessionActive: true,
       isLiveScreenActive: false,
       selectedScreenSourceId: loaded.selectedScreenSourceId ?? DEFAULT_STATE.selectedScreenSourceId,
@@ -543,8 +430,11 @@ export class DomainStore {
       personalMemories: Array.isArray(loaded.personalMemories) ? loaded.personalMemories : [],
       voiceProfiles: Array.isArray(loaded.voiceProfiles) ? loaded.voiceProfiles : [],
       transcripts: freshTranscripts,
-      pastSessions: Array.isArray(loaded.pastSessions) && loaded.pastSessions.length > 0 ? loaded.pastSessions : DEFAULT_PAST_SESSIONS,
-      currentSessionId: loaded.currentSessionId ?? null,
+      pastSessions: realSessions,
+      currentSessionId:
+        loaded.currentSessionId && !LEGACY_MOCK_SESSION_IDS.has(loaded.currentSessionId)
+          ? loaded.currentSessionId
+          : realSessions[0]?.id || null,
     };
   }
 
@@ -573,7 +463,16 @@ export class DomainStore {
     };
 
     activeSession.assistEvents.push(newAssistEvent);
-    const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+    if (
+      activeSession.title.startsWith('Meeting Session') &&
+      event.userPrompt &&
+      event.userPrompt !== 'Assist' &&
+      event.userPrompt !== 'Live Spoken Question'
+    ) {
+      activeSession.title = event.userPrompt.slice(0, 48);
+    }
+
+    const sessions = [...(this.state.pastSessions || [])];
     const idx = sessions.findIndex((s) => s.id === activeSession.id);
     if (idx !== -1) {
       sessions[idx] = activeSession;
@@ -584,14 +483,13 @@ export class DomainStore {
   }
 
   public addTranscriptSegment(segment: TranscriptSegment): void {
-    if (segment.isPartial) return; // Only store finalized speech segments
+    if (segment.isPartial) return;
     const current = this.state.transcripts || [];
     const exists = current.some((s) => s.id === segment.id);
     if (!exists) {
       const updated = [segment, ...current].slice(0, 500);
 
-      // Record to active meeting session
-      const sessions = [...(this.state.pastSessions || DEFAULT_PAST_SESSIONS)];
+      const sessions = [...(this.state.pastSessions || [])];
       let activeSession = sessions.find((s) => s.id === this.getActiveSessionId());
       if (!activeSession && this.state.isSessionActive) {
         activeSession = this.ensureActiveSession();
@@ -600,9 +498,14 @@ export class DomainStore {
       if (activeSession) {
         activeSession.transcripts.push(segment);
         activeSession.durationSeconds = Math.max(1, Math.round((Date.now() - activeSession.startTime) / 1000));
-        if (activeSession.title === 'Live Meeting Session' && activeSession.transcripts.length >= 2) {
-          const firstSnippet = activeSession.transcripts[0].text.slice(0, 35);
-          activeSession.title = firstSnippet ? `${firstSnippet}...` : 'Live Meeting Session';
+        if (
+          activeSession.title.startsWith('Meeting Session') &&
+          activeSession.transcripts.length >= 2
+        ) {
+          const firstSnippet = activeSession.transcripts[0].text.slice(0, 42).trim();
+          if (firstSnippet.length > 6) {
+            activeSession.title = `${firstSnippet}...`;
+          }
         }
         const sIdx = sessions.findIndex((s) => s.id === activeSession.id);
         if (sIdx !== -1) {
@@ -619,7 +522,7 @@ export class DomainStore {
       try {
         const transcriptsDir = path.join(app.getPath('userData'), 'transcripts');
         if (!fs.existsSync(transcriptsDir)) {
-          fs.mkdirSync(transcriptsDir, { recursive: true });
+          fs.mkdirSync(transcriptsDir, { recursive: true});
         }
         const todayStr = new Date().toISOString().slice(0, 10);
         const logFile = path.join(transcriptsDir, `transcript-${todayStr}.jsonl`);
@@ -702,18 +605,15 @@ export class DomainStore {
       });
   }
 
-  private persistSync(data: AppState): void {
+  private persistSync(stateToSave: AppState): void {
     try {
       const dir = path.dirname(this.filePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      const dataString = JSON.stringify(data, null, 2);
-      const tempPath = `${this.filePath}.tmp`;
-      fs.writeFileSync(tempPath, dataString, 'utf-8');
-      fs.renameSync(tempPath, this.filePath);
-    } catch (err) {
-      console.error('[Store] Synchronous initial persist failed:', err);
+      fs.writeFileSync(this.filePath, JSON.stringify(stateToSave, null, 2), 'utf-8');
+    } catch (error) {
+      console.error('[Store] Initial synchronous write failed:', error);
     }
   }
 }
