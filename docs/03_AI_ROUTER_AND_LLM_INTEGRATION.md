@@ -6,17 +6,17 @@ The AI Router ([`aiRouter.ts`](file:///Users/piyushgoel/Downloads/Projects/Cluel
 
 ---
 
-## 1. Multi-Provider Architecture
+## 1. 100% Offline Local Architecture
 
-The router seamlessly switches between local on-device models and high-throughput cloud endpoints:
+All cloud models requiring external API keys (Google Gemini, OpenAI, Anthropic, Groq) have been completely removed. The AI Router operates **100% locally on-device** via Ollama on `http://127.0.0.1:11434`:
 
-| Provider | Supported Models | Primary Use Case | Streaming Protocol |
+| Local Model | Size | Primary Use Case | Modality |
 |---|---|---|---|
-| **Local Ollama** (Default) | `gemma4:e4b`, `gemma4:12b`, `nemotron-mini`, `qwen3-vl` | 100% offline, zero data leakage, sub-250ms teleprompting | HTTP POST NDJSON |
-| **Google Gemini** | `gemini-2.5-flash`, `gemini-1.5-pro` | Cloud multimodal analysis and ultra-long context | SSE (`v1beta/models/...:streamGenerateContent`) |
-| **OpenAI** | `gpt-4o`, `gpt-4o-mini` | Production coding and technical deep-dives | SSE (`/v1/chat/completions`) |
-| **Anthropic** | `claude-3-5-sonnet-20241022` | Complex software architecture and system design | Anthropic SSE messages API |
-| **Groq** | `llama-3.3-70b-versatile` | High-speed cloud teleprompting (~300 tokens/sec) | OpenAI-compatible SSE |
+| **`gemma4:e4b`** (Default) | ~3.2 GB | Sub-250ms quick-thinking teleprompting, general Q&A | Text + Screen Snapshots |
+| **`gemma4:12b`** | ~7.8 GB | Deep architectural reasoning, complex system design, live coding | Text + Screen Snapshots |
+| **`nemotron-mini`** | ~2.7 GB | Ultra-compact low-latency fallback | Text |
+| **`qwen3-vl`** | ~4.1 GB | Multimodal vision & visual OCR | Text + Vision |
+| **`cluely-gemma4`** | Custom GGUF | Fine-tuned custom QLoRA adapter compiled in Settings | Text + Screen Snapshots |
 
 ---
 

@@ -43,11 +43,6 @@ export const DEFAULT_AI_CONFIG: AIProviderConfig = {
   embeddingModel: 'gemma2:2b',
   voiceProvider: 'nvidia-parakeet-tdt',
   apiKeys: {
-    gemini: '',
-    openai: '',
-    anthropic: '',
-    groq: '',
-    deepgram: '',
     ollamaUrl: 'http://127.0.0.1:11434',
   },
   nvidiaSpeech: DEFAULT_NVIDIA_SPEECH_CONFIG,
@@ -362,15 +357,16 @@ export class DomainStore {
       nvidiaSpeech: mergedNvidiaSpeech,
     };
 
-    if (mergedAIConfig.activeProvider === 'gemini' && !mergedAIConfig.apiKeys.gemini) {
-      mergedAIConfig.activeProvider = 'ollama';
+    mergedAIConfig.activeProvider = 'ollama';
+    if (!mergedAIConfig.activeModel) {
       mergedAIConfig.activeModel = 'gemma4:e4b';
     }
 
     if (
       !mergedAIConfig.voiceProvider ||
-      (mergedAIConfig.voiceProvider === 'nvidia-hybrid' && !mergedAIConfig.nvidiaSpeech.nimApiKey) ||
-      (mergedAIConfig.voiceProvider === 'gemini-native' && !mergedAIConfig.apiKeys.gemini)
+      (mergedAIConfig.voiceProvider as string) === 'gemini-native' ||
+      (mergedAIConfig.voiceProvider as string) === 'groq-whisper' ||
+      (mergedAIConfig.voiceProvider as string) === 'deepgram-nova3'
     ) {
       mergedAIConfig.voiceProvider = 'nvidia-parakeet-tdt';
     }

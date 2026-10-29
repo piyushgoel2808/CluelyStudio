@@ -275,10 +275,7 @@ export const CluelyOverlayCard: React.FC<CluelyOverlayCardProps> = ({
       ? Math.max(0.2, Math.min(1.0, state.overlayOpacity))
       : 0.92;
 
-  const activeModelLabel =
-    state?.aiConfig?.activeProvider === 'ollama'
-      ? state?.aiConfig?.activeModel || 'gemma4:e4b'
-      : `${state?.aiConfig?.activeProvider || 'ollama'}`;
+  const activeModelLabel = state?.aiConfig?.activeModel || 'gemma4:e4b';
 
   return (
     <div

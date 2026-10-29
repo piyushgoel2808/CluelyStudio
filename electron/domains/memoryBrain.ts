@@ -445,7 +445,6 @@ export class MemoryBrain {
 
   private async runStructuredLLM(prompt: string): Promise<string> {
     const state = store.getState();
-    const provider = state.aiConfig.activeProvider;
     const ollamaUrl = (state.aiConfig.apiKeys.ollamaUrl || 'http://127.0.0.1:11434').replace(
       /\/+$/,
       ''
@@ -455,59 +454,35 @@ export class MemoryBrain {
         ? state.aiConfig.activeModel
         : 'gemma4:e4b';
 
-    if (provider === 'ollama' || !state.aiConfig.apiKeys.gemini) {
-      try {
-        const res = await fetch(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a precise JSON extraction engine. Output ONLY valid JSON matching the requested schema with no markdown code fences or commentary.',
-              },
-              { role: 'user', content: prompt },
-            ],
-            format: 'json',
-            stream: false,
-            think: false,
-            keep_alive: -1,
-            options: { temperature: 0.1, num_ctx: 2048, num_predict: 512 },
-          }),
-        });
-        if (res.ok) {
-          const json = (await res.json()) as { message?: { content?: string } };
-          if (json.message?.content) {
-            return json.message.content.trim();
-          }
-        }
-      } catch (err) {
-        console.warn('[MemoryBrain] Local Ollama JSON extraction failed:', err);
-      }
-    }
-
-    const geminiKey = state.aiConfig.apiKeys.gemini;
-    if (geminiKey) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-      const res = await fetch(endpoint, {
+    try {
+      const res = await fetch(`${ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: 'application/json',
-          },
+          model,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a precise JSON extraction engine. Output ONLY valid JSON matching the requested schema with no markdown code fences or commentary.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          format: 'json',
+          stream: false,
+          think: false,
+          keep_alive: -1,
+          options: { temperature: 0.1, num_ctx: 2048, num_predict: 512 },
         }),
       });
       if (res.ok) {
-        const json = (await res.json()) as {
-          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-        };
-        return json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const json = (await res.json()) as { message?: { content?: string } };
+        if (json.message?.content) {
+          return json.message.content.trim();
+        }
       }
+    } catch (err) {
+      console.warn('[MemoryBrain] Local Ollama JSON extraction failed:', err);
     }
 
     return '';

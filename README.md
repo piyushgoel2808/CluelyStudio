@@ -9,7 +9,7 @@
 ### 1. Authentic Floating Control Pill HUD & Multi-Window Topology
 - **Control Pill HUD (`/#/control`)**: A compact, frameless, transparent floating pill window (`196x54px`, `alwaysOnTop: true`, `type: 'panel'`, `skipTaskbar: true`, `hiddenInMissionControl: true`). Features the iconic blue **"C"** logo button, blue capsule **"✨ Ask"** button, dark **Microphone** recording toggle, and dark **Settings** gear button.
 - **Assistant Chat Overlay (`/#/overlay`)**: A sleek `668px` floating teleprompter window positioned directly beneath the Control Pill. Drops down instantly when clicking **Ask** or pressing `⌘↵`, and minimizes with `Esc` or the `✕` close button.
-- **Settings Studio (`/#/settings`)**: A full-featured `960x680px` configuration workspace for BYOK cloud keys (Gemini, OpenAI, Claude), Local AI & Vector DB management, real WebAudio frequency analyser mic monitoring, session history, and fine-tuning exports.
+- **Settings Studio (`/#/settings`)**: A full-featured `960x680px` configuration workspace for Local AI & Vector DB management (100% offline, zero cloud API keys required), real WebAudio frequency analyser mic monitoring, session history, and fine-tuning exports.
 - **Unified Global App Toggle (`⌘\`)**: Pressing `CommandOrControl+\` stealthily hides or restores all Cluely windows (both Overlay and Settings) at once.
 - **Live Overlay Transparency Slider**: Real-time slider (20%–100%) under **Settings ➔ General & Audio** that dynamically updates window opacity and CSS backdrop filters.
 

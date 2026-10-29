@@ -104,23 +104,15 @@ export interface NvidiaSpeechConfig {
 }
 
 export interface AIProviderConfig {
-  activeProvider: 'ollama' | 'gemini' | 'openai' | 'anthropic' | 'groq';
+  activeProvider: 'ollama';
   activeModel: string;
   embeddingModel?: string;
   voiceProvider:
     | 'nvidia-parakeet-tdt'
     | 'whisper-base-onnx'
     | 'nvidia-hybrid'
-    | 'nvidia-nemotron-nim'
-    | 'gemini-native'
-    | 'groq-whisper'
-    | 'deepgram-nova3';
+    | 'nvidia-nemotron-nim';
   apiKeys: {
-    gemini: string;
-    openai: string;
-    anthropic: string;
-    groq: string;
-    deepgram: string;
     ollamaUrl: string;
   };
   nvidiaSpeech: NvidiaSpeechConfig;

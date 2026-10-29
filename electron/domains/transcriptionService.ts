@@ -65,43 +65,16 @@ export class TranscriptionService {
           isPartial,
           language
         );
-      } else if (provider === 'nvidia-parakeet-tdt') {
-        transcribedText = await this.transcribeWithParakeetTDT(
-          payload.wavBase64,
-          language
-        );
       } else if (provider === 'nvidia-nemotron-nim') {
         transcribedText = await this.transcribeWithNemotron(
           payload.wavBase64,
           language
         );
-      } else if (provider === 'groq-whisper') {
-        transcribedText = await this.transcribeWithGroq(
-          payload.wavBase64,
-          config.apiKeys.groq,
-          language
-        );
-      } else if (provider === 'deepgram-nova3') {
-        transcribedText = await this.transcribeWithDeepgram(
-          payload.wavBase64,
-          config.apiKeys.deepgram,
-          language
-        );
       } else {
-        // Fallback: If Gemini API key is configured, use Gemini; otherwise use local offline Parakeet-TDT
-        if (config.apiKeys.gemini) {
-          transcribedText = await this.transcribeWithGemini(
-            payload.wavBase64,
-            config.apiKeys.gemini,
-            config.activeModel || 'gemini-2.5-flash',
-            language
-          );
-        } else {
-          transcribedText = await this.transcribeWithParakeetTDT(
-            payload.wavBase64,
-            language
-          );
-        }
+        transcribedText = await this.transcribeWithParakeetTDT(
+          payload.wavBase64,
+          language
+        );
       }
     } catch (error) {
       console.warn('[TranscriptionService] Primary speech engine error, falling back to local Parakeet-TDT:', error);
@@ -505,183 +478,6 @@ export class TranscriptionService {
       engine: 'none',
       message: 'No NVIDIA server reachable. Set a valid nvapi-... key or start local Parakeet-TDT.',
     };
-  }
-
-  private async transcribeWithGemini(
-    wavBase64: string,
-    apiKey: string,
-    modelName: string,
-    language: string
-  ): Promise<string> {
-    if (!apiKey) {
-      console.warn('[TranscriptionService] No Gemini API key configured in Settings');
-      return '';
-    }
-
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-    const promptText = `Transcribe the spoken audio accurately in ${language}. Output ONLY the exact spoken words without timestamps, speaker tags, or commentary. If there is only silence or background noise, output an empty string.`;
-
-    const requestBody = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inline_data: {
-                mime_type: 'audio/wav',
-                data: wavBase64,
-              },
-            },
-            {
-              text: promptText,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.0,
-        maxOutputTokens: 1024,
-      },
-    };
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`[TranscriptionService] Gemini API returned status ${response.status}:`, errText);
-      return '';
-    }
-
-    interface GeminiResponse {
-      candidates?: Array<{
-        content?: {
-          parts?: Array<{
-            text?: string;
-          }>;
-        };
-      }>;
-    }
-
-    const json = (await response.json()) as GeminiResponse;
-    const parts = json.candidates?.[0]?.content?.parts;
-    if (parts && parts.length > 0 && parts[0].text) {
-      return parts[0].text.trim();
-    }
-    return '';
-  }
-
-  private async transcribeWithGroq(
-    wavBase64: string,
-    apiKey: string,
-    language: string
-  ): Promise<string> {
-    if (!apiKey) {
-      console.warn('[TranscriptionService] No Groq API key configured in Settings');
-      return '';
-    }
-
-    const wavBuffer = Buffer.from(wavBase64, 'base64');
-    const formData = new FormData();
-    const blob = new Blob([wavBuffer], { type: 'audio/wav' });
-    formData.append('file', blob, 'audio.wav');
-    formData.append('model', 'whisper-large-v3-turbo');
-    formData.append('response_format', 'json');
-
-    let langCode = 'auto';
-    const langLower = language.toLowerCase();
-    if (langLower.startsWith('en')) {
-      langCode = 'en';
-    } else if (langLower.includes('hindi') || langLower === 'hi') {
-      langCode = 'hi';
-    } else if (langLower.includes('spanish') || langLower === 'es') {
-      langCode = 'es';
-    } else if (langLower.includes('french') || langLower === 'fr') {
-      langCode = 'fr';
-    } else if (langLower.includes('german') || langLower === 'de') {
-      langCode = 'de';
-    } else if (langLower.includes('japanese') || langLower === 'ja') {
-      langCode = 'ja';
-    }
-    if (langCode !== 'auto') {
-      formData.append('language', langCode);
-    }
-
-    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: formData,
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`[TranscriptionService] Groq API returned status ${response.status}:`, errText);
-      return '';
-    }
-
-    interface GroqResponse {
-      text?: string;
-    }
-    const json = (await response.json()) as GroqResponse;
-    return json.text || '';
-  }
-
-  private async transcribeWithDeepgram(
-    wavBase64: string,
-    apiKey: string,
-    language: string
-  ): Promise<string> {
-    if (!apiKey) {
-      console.warn('[TranscriptionService] No Deepgram API key configured in Settings');
-      return '';
-    }
-
-    const wavBuffer = Buffer.from(wavBase64, 'base64');
-    let langCode = 'multi';
-    const langLower = language.toLowerCase();
-    if (langLower.startsWith('en')) {
-      langCode = 'en';
-    } else if (langLower.includes('hindi') || langLower === 'hi') {
-      langCode = 'hi';
-    }
-    const url = `https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=${langCode}`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${apiKey}`,
-        'Content-Type': 'audio/wav',
-      },
-      body: wavBuffer,
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error(`[TranscriptionService] Deepgram API returned status ${response.status}:`, err);
-      return '';
-    }
-
-    interface DeepgramResponse {
-      results?: {
-        channels?: Array<{
-          alternatives?: Array<{
-            transcript?: string;
-          }>;
-        }>;
-      };
-    }
-
-    const json = (await response.json()) as DeepgramResponse;
-    const transcript = json.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-    return transcript || '';
   }
 
   private formatTimeMs(ms: number): string {

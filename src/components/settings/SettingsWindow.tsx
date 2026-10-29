@@ -707,24 +707,10 @@ export const SettingsWindow: React.FC = () => {
                           </div>
                         </div>
                       </div>
-                      <select
-                        value={state?.aiConfig?.activeProvider || 'ollama'}
-                        onChange={(e) =>
-                          patchState({
-                            aiConfig: {
-                              ...state!.aiConfig,
-                              activeProvider: e.target.value as any,
-                            },
-                          })
-                        }
-                        className="bg-[#242428] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-400"
-                      >
-                        <option value="ollama">Local Ollama (100% Offline & Private)</option>
-                        <option value="gemini">Google Gemini (Cloud BYOK)</option>
-                        <option value="openai">OpenAI GPT-4o (Cloud BYOK)</option>
-                        <option value="anthropic">Anthropic Claude 3.5 (Cloud BYOK)</option>
-                        <option value="groq">Groq Llama 3.3 (Fast Cloud BYOK)</option>
-                      </select>
+                      <div className="bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs px-3 py-1.5 rounded-xl font-medium flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        <span>Local Ollama (100% Offline)</span>
+                      </div>
                     </div>
 
                     {state?.aiConfig?.activeProvider === 'ollama' && (
@@ -832,9 +818,6 @@ export const SettingsWindow: React.FC = () => {
                         <option value="whisper-base-onnx">
                           Whisper Small Multilingual (Local Offline ONNX — Hindi & English)
                         </option>
-                        <option value="nvidia-hybrid">NVIDIA Hybrid (Cloud NIM + Local Parakeet)</option>
-                        <option value="groq-whisper">Groq Whisper Large v3 Turbo (Cloud)</option>
-                        <option value="deepgram-nova3">Deepgram Nova-3 (Cloud)</option>
                       </select>
                     </div>
                   </div>
@@ -1306,36 +1289,26 @@ export const SettingsWindow: React.FC = () => {
                     </div>
 
                     <div className="pt-3 border-t border-white/10 space-y-2.5">
-                      <div className="text-neutral-400 font-medium">
-                        Optional Cloud BYOK API Keys (Stored locally on disk — leave blank for 100% offline Ollama mode)
-                      </div>
-                      {[
-                        { key: 'gemini', label: 'Google Gemini', placeholder: 'AIzaSy...' },
-                        { key: 'openai', label: 'OpenAI (GPT-4o)', placeholder: 'sk-...' },
-                        { key: 'anthropic', label: 'Anthropic (Claude)', placeholder: 'sk-ant-...' },
-                        { key: 'groq', label: 'Groq (Whisper/Llama)', placeholder: 'gsk_...' },
-                      ].map((item) => (
-                        <div key={item.key} className="flex items-center gap-3">
-                          <span className="w-32 text-neutral-400 shrink-0">{item.label}:</span>
-                          <input
-                            type="password"
-                            value={(state?.aiConfig?.apiKeys as any)?.[item.key] || ''}
-                            onChange={(e) =>
-                              patchState({
-                                aiConfig: {
-                                  ...state!.aiConfig,
-                                  apiKeys: {
-                                    ...state!.aiConfig.apiKeys,
-                                    [item.key]: e.target.value,
-                                  },
-                                },
-                              })
-                            }
-                            placeholder={item.placeholder}
-                            className="flex-1 bg-[#121214] border border-white/15 rounded-xl px-3 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-[#0091FF]"
-                          />
+                      <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5">
+                          <Check size={16} />
                         </div>
-                      ))}
+                        <div>
+                          <div className="text-sm font-semibold text-white flex items-center gap-2">
+                            <span>100% Offline Local Engine Active</span>
+                            <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-mono">
+                              Zero Cloud
+                            </span>
+                          </div>
+                          <div className="text-xs text-neutral-300 mt-1 leading-relaxed">
+                            CluelyStudio operates entirely on-device using local Ollama (<code className="text-sky-300 font-mono">gemma4:e4b</code> &amp; <code className="text-sky-300 font-mono">gemma4:12b</code>) and local Sherpa-ONNX speech recognition. All cloud models requiring API keys (OpenAI, Gemini, Anthropic, Groq) have been completely removed. Your meeting audio, transcripts, and screen context never leave your machine.
+                          </div>
+                          <div className="mt-2.5 flex items-center gap-2 text-[11px] text-neutral-400 font-mono">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                            <span>Ollama Endpoint: {state?.aiConfig?.apiKeys?.ollamaUrl || 'http://127.0.0.1:11434'}</span>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>

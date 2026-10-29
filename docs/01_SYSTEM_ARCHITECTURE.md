@@ -86,7 +86,7 @@ The application coordinates three specialized `BrowserWindow` instances via [`wi
 ### 3. Settings Studio Window (`/#/settings`)
 - **Dimensions**: `960px x 670px` (minWidth: 860, minHeight: 600).
 - **Tabs**: General & Audio, Sessions & Notes, Local AI & Vector DB, Modes & File RAG, Memory Vault, Shortcuts & Mobile.
-- **Controls**: Live Overlay Opacity Slider (20%–100%), real WebAudio frequency analyser microphone meter, BYOK cloud credentials, and QLoRA fine-tuning exporter.
+- **Controls**: Live Overlay Opacity Slider (20%–100%), real WebAudio frequency analyser microphone meter, Local privacy status, and QLoRA fine-tuning exporter.
 
 ---
 
